@@ -18,7 +18,7 @@ if _moge_path not in sys.path:
 
 # The full inference stack (SAM3 + LingBot depth + vis4d) pulls in heavy
 # optional dependencies. Guard these imports so lightweight subpackages
-# (e.g. ``wilddet3d.twostage``) remain importable without the full stack.
+# (e.g. ``wilddet3d.dense``) remain importable without the full stack.
 try:
     from .data_types import Det3DOut, WildDet3DInput, WildDet3DOut
     from .inference import WildDet3DPredictor, build_model

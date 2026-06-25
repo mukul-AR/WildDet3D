@@ -46,8 +46,7 @@ hf_hub_download("robbyant/lingbot-depth-pretrain-vitl-14-v0.5", "model.pt",
 print("weights downloaded")
 PY
 
-echo "Setup complete. Train with:"
-echo "  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True WD3D_SKIP_DEPTH_LOSS=1 \\"
-echo "  MIXED_PRECISION=bf16 PYTHONPATH=. .venv/bin/vis4d fit \\"
-echo "    --config configs/training/stage5_anyware_9dof_train.py --gpus 1 \\"
-echo "    --ckpt ckpt/wilddet3d_stage2_alldata_12e_v1.0.pt"
+echo "Setup complete. Train (sim data -> dense JENGA detector) with:"
+echo "  PYTHONPATH=. .venv/bin/python scripts/train_dense_9dof.py \\"
+echo "    --sim-root <anyware-sim>/build/scenes/synth --epochs 6 \\"
+echo "    --wilddet3d-ckpt ckpt/wilddet3d_stage2_alldata_12e_v1.0.pt"

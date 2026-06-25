@@ -25,7 +25,7 @@ sys.path.insert(0, "third_party/sam3")
 sys.path.insert(0, "third_party/lingbot_depth")
 sys.path.insert(0, "third_party/moge")
 
-from wilddet3d.dense.dataset import DenseAnywareDataset, dense_collate  # noqa: E402
+from wilddet3d.dense.sim_dataset import SimDenseDataset, dense_collate  # noqa: E402
 from wilddet3d.dense.decode import decode_dense  # noqa: E402
 from wilddet3d.dense.model import DenseDet3D  # noqa: E402
 
@@ -69,11 +69,9 @@ def denorm(img_t):
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dense-ckpt", default="ckpt/dense_9dof/dense_9dof_last.pt")
-    ap.add_argument("--base-ckpt", default="ckpt/wilddet3d_stage5_anyware_9dof_2ep.ckpt")
-    ap.add_argument("--data-root", default="data/anyware_scenes")
-    ap.add_argument("--sim-root", default="", help="visualize sim scenes (.../scenes/synth) instead of COCO")
+    ap.add_argument("--base-ckpt", default="ckpt/wilddet3d_stage2_alldata_12e_v1.0.pt")
+    ap.add_argument("--sim-root", required=True, help="sim scenes dir (.../anyware-sim/build/scenes/synth)")
     ap.add_argument("--sim-target", default="actual", choices=["actual", "visible"])
-    ap.add_argument("--split", default="val")
     ap.add_argument("--num-images", type=int, default=6)
     ap.add_argument("--score-thresh", type=float, default=0.3)
     ap.add_argument("--fpn-level", type=int, default=1)
@@ -89,12 +87,7 @@ def main() -> None:
     model.load_state_dict(sd, strict=False)
     model.eval().cuda()
 
-    if args.sim_root:
-        from wilddet3d.dense.sim_dataset import SimDenseDataset
-
-        ds = SimDenseDataset(args.sim_root, args.size, args.sim_target)
-    else:
-        ds = DenseAnywareDataset(args.data_root, args.split, args.size)
+    ds = SimDenseDataset(args.sim_root, args.size, args.sim_target)
     os.makedirs(args.out, exist_ok=True)
 
     for idx in range(min(args.num_images, len(ds))):
@@ -126,7 +119,7 @@ def main() -> None:
         draw_boxes(img, pr, k, (0, 255, 0), 2)
         cv2.putText(img, f"pred={len(pr)} (green)  GT={len(gt)} (red)",
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
-        path = os.path.join(args.out, f"{args.split}_{idx:03d}.png")
+        path = os.path.join(args.out, f"sim_{args.sim_target}_{idx:03d}.png")
         cv2.imwrite(path, img)
         print(f"saved {path}  (pred={len(pr)}, GT={len(gt)})")
 

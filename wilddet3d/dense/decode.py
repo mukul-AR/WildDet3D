@@ -6,7 +6,7 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 
-from wilddet3d.twostage.rotation_utils import rotation_6d_to_matrix
+from wilddet3d.dense.rotation_utils import rotation_6d_to_matrix
 
 
 def _nms_peaks(heat: Tensor, kernel: int = 3) -> Tensor:

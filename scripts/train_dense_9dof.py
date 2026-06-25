@@ -9,7 +9,7 @@ input.
 Usage:
     PYTHONPATH=. WD3D_SKIP_DEPTH_LOSS=1 .venv/bin/python \
         scripts/train_dense_9dof.py --epochs 6 \
-        --wilddet3d-ckpt ckpt/wilddet3d_stage5_anyware_9dof_2ep.ckpt
+        --wilddet3d-ckpt ckpt/wilddet3d_stage2_alldata_12e_v1.0.pt
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ sys.path.insert(0, "third_party/sam3")
 sys.path.insert(0, "third_party/lingbot_depth")
 sys.path.insert(0, "third_party/moge")
 
-from wilddet3d.dense.dataset import DenseAnywareDataset, dense_collate  # noqa: E402
+from wilddet3d.dense.sim_dataset import SimDenseDataset, dense_collate  # noqa: E402
 from wilddet3d.dense.loss import DenseDet3DLoss  # noqa: E402
 from wilddet3d.dense.model import DenseDet3D  # noqa: E402
 from wilddet3d.dense.targets import build_dense_targets  # noqa: E402
@@ -58,10 +58,9 @@ def run_targets(batch: dict, pred: dict, size: int, device: str) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data-root", default="data/anyware_scenes")
-    ap.add_argument("--sim-root", default="", help="if set, train on sim scenes (.../scenes/synth) instead of the COCO data-root")
+    ap.add_argument("--sim-root", required=True, help="sim scenes dir (.../anyware-sim/build/scenes/synth)")
     ap.add_argument("--sim-target", default="actual", choices=["actual", "visible"])
-    ap.add_argument("--wilddet3d-ckpt", default="ckpt/wilddet3d_stage5_anyware_9dof_2ep.ckpt")
+    ap.add_argument("--wilddet3d-ckpt", default="ckpt/wilddet3d_stage2_alldata_12e_v1.0.pt")
     ap.add_argument("--epochs", type=int, default=6)
     ap.add_argument("--batch-size", type=int, default=2)
     ap.add_argument("--lr", type=float, default=2e-4)
@@ -80,14 +79,8 @@ def main() -> None:
     ap.add_argument("--wandb-run-name", default=os.environ.get("WD3D_RUN_NAME", "jenga-dense"))
     args = ap.parse_args()
 
-    if args.sim_root:
-        from wilddet3d.dense.sim_dataset import SimDenseDataset
-
-        ds = SimDenseDataset(args.sim_root, args.size, args.sim_target, args.max_scenes)
-        print(f"sim train samples (views): {len(ds)}  (target={args.sim_target})")
-    else:
-        ds = DenseAnywareDataset(args.data_root, "train", args.size, args.max_scenes)
-        print(f"train images: {len(ds)}")
+    ds = SimDenseDataset(args.sim_root, args.size, args.sim_target, args.max_scenes)
+    print(f"sim train samples (views): {len(ds)}  (target={args.sim_target})")
     loader = DataLoader(
         ds, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
         collate_fn=dense_collate, drop_last=True, pin_memory=True,

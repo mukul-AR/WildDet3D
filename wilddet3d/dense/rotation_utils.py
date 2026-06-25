@@ -116,3 +116,18 @@ def symmetry_min_geodesic(d6_pred: Tensor, d6_gt: Tensor) -> Tensor:
 def rad2deg(x: Tensor) -> Tensor:
     """Radians -> degrees."""
     return x * (180.0 / math.pi)
+
+
+def symmetry_chordal_loss(d6_pred: Tensor, d6_gt: Tensor) -> Tensor:
+    """Per-sample min chordal (squared Frobenius) rotation loss ``[N]``.
+
+    Minimised over the cuboid symmetry group so the model is not penalised for
+    predicting a physically identical but differently-labelled rotation.
+    """
+    r_pred = rotation_6d_to_matrix(d6_pred)  # [N, 3, 3]
+    variants = cuboid_symmetry_rotation_6d(d6_gt)  # [N, 4, 6]
+    n, k, _ = variants.shape
+    r_var = rotation_6d_to_matrix(variants.reshape(n * k, 6)).reshape(n, k, 3, 3)
+    diff = r_pred.unsqueeze(1) - r_var  # [N, 4, 3, 3]
+    chordal = diff.pow(2).sum(dim=(-1, -2))  # [N, 4]
+    return chordal.min(dim=1).values  # [N]

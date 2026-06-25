@@ -6,7 +6,7 @@ camera's ``metadata.json`` carries ``intrinsics``, ``camera_extrinsic_4x4``
 ``actual_`` ``extrinsic_4x4`` + ``geometry`` (and ``visible_fraction``). Boxes
 are in world frame; camera-frame pose is ``inv(camera_extrinsic_4x4) @ pose``.
 
-This yields the same per-sample dict as ``DenseAnywareDataset`` so the dense
+This yields the same per-sample dict the dense detector consumes, so the dense
 trainer/loss are reused unchanged. ``target`` selects whether the GT geometry
 is the ``visible`` (design-doc Stage-1) or ``actual`` (full) box.
 """
@@ -23,9 +23,26 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from wilddet3d.dense.dataset import _IMAGENET_MEAN, _IMAGENET_STD, _resize_pad
-
+_IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+_IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 _SIGNS = np.array(list(itertools.product([-0.5, 0.5], repeat=3)), dtype=np.float32)
+
+
+def _resize_pad(img: np.ndarray, size: int, nearest: bool) -> tuple:
+    """Aspect-preserving resize to fit ``size`` then pad to ``size`` x ``size``."""
+    h, w = img.shape[:2]
+    scale = size / max(h, w)
+    nh, nw = int(round(h * scale)), int(round(w * scale))
+    interp = cv2.INTER_NEAREST if nearest else cv2.INTER_AREA
+    r = cv2.resize(img, (nw, nh), interpolation=interp)
+    pad_x, pad_y = (size - nw) // 2, (size - nh) // 2
+    if r.ndim == 3:
+        out = np.zeros((size, size, r.shape[2]), dtype=r.dtype)
+        out[pad_y : pad_y + nh, pad_x : pad_x + nw] = r
+    else:
+        out = np.zeros((size, size), dtype=r.dtype)
+        out[pad_y : pad_y + nh, pad_x : pad_x + nw] = r
+    return out, scale, pad_x, pad_y
 
 
 class SimDenseDataset(Dataset):
@@ -128,3 +145,16 @@ class SimDenseDataset(Dataset):
             "rot6d": torch.tensor(rot6d, dtype=torch.float32).reshape(n, 6),
             "box2d": torch.tensor(box2d, dtype=torch.float32).reshape(n, 4),
         }
+
+
+def dense_collate(batch: list[dict]) -> dict:
+    """Stack images/depth/K; keep variable-length GT as lists."""
+    return {
+        "image": torch.stack([b["image"] for b in batch]),
+        "depth": torch.stack([b["depth"] for b in batch]),
+        "K": torch.stack([b["K"] for b in batch]),
+        "centers": [b["centers"] for b in batch],
+        "sizes": [b["sizes"] for b in batch],
+        "rot6d": [b["rot6d"] for b in batch],
+        "box2d": [b["box2d"] for b in batch],
+    }

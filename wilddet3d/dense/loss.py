@@ -5,8 +5,11 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
-from wilddet3d.twostage.losses import symmetry_chordal_loss
-from wilddet3d.twostage.rotation_utils import rad2deg, symmetry_min_geodesic
+from wilddet3d.dense.rotation_utils import (
+    rad2deg,
+    symmetry_chordal_loss,
+    symmetry_min_geodesic,
+)
 
 
 def centernet_focal_loss(pred_sigmoid: Tensor, gt: Tensor, eps: float = 1e-4) -> Tensor:
