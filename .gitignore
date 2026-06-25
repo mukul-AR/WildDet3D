@@ -19,3 +19,6 @@ third_party/moge/
 
 # Weights & Biases local run cache
 wandb/
+
+# Inference visualization output
+viz_out/
