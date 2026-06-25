@@ -16,19 +16,32 @@ if _lingbot_path not in sys.path:
 if _moge_path not in sys.path:
     sys.path.insert(0, _moge_path)
 
-from .data_types import Det3DOut, WildDet3DInput, WildDet3DOut
-from .inference import WildDet3DPredictor, build_model
-from .model import WildDet3D
-from .optimize import optimize_for_inference
-from .preprocessing import preprocess
+# The full inference stack (SAM3 + LingBot depth + vis4d) pulls in heavy
+# optional dependencies. Guard these imports so lightweight subpackages
+# (e.g. ``wilddet3d.twostage``) remain importable without the full stack.
+try:
+    from .data_types import Det3DOut, WildDet3DInput, WildDet3DOut
+    from .inference import WildDet3DPredictor, build_model
+    from .model import WildDet3D
+    from .optimize import optimize_for_inference
+    from .preprocessing import preprocess
 
-__all__ = [
-    "WildDet3D",
-    "WildDet3DPredictor",
-    "WildDet3DInput",
-    "WildDet3DOut",
-    "Det3DOut",
-    "build_model",
-    "optimize_for_inference",
-    "preprocess",
-]
+    __all__ = [
+        "WildDet3D",
+        "WildDet3DPredictor",
+        "WildDet3DInput",
+        "WildDet3DOut",
+        "Det3DOut",
+        "build_model",
+        "optimize_for_inference",
+        "preprocess",
+    ]
+except ImportError as _exc:  # optional heavy deps (vis4d, utils3d, ...) absent
+    import warnings
+
+    warnings.warn(
+        "wilddet3d: full inference stack unavailable "
+        f"({_exc}); lightweight subpackages still importable.",
+        stacklevel=2,
+    )
+    __all__ = []
