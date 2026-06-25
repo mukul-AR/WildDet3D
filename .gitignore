@@ -5,7 +5,11 @@ vis4d-workspace/
 
 # Local-only data + pretrained (users bring their own)
 data/
+/dataset/
 pretrained/
+
+# Generated artifacts (graphify knowledge-graph output)
+/graphify-out/
 
 # Optional MoGe submodule location (see README installation)
 third_party/moge/

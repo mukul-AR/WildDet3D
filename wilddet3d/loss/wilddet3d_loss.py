@@ -978,13 +978,37 @@ class WildDet3DLoss(nn.Module):
         losses["loss_dim"] = loss_dim * self.config.loss_dim_weight
 
         # Rotation loss
-        loss_rot = l1_loss(
-            src_boxes_3d[:, 6:],
-            target_boxes_3d_encoded[:, 6:],
-            reducer=SumWeightedLoss(
-                weight=weights_3d[:, 6:], avg_factor=num_boxes.item()
-            ),
-        )
+        if getattr(self.box_coder, "symmetry", "none") == "cuboid":
+            # Symmetry-aware: min L1 over the 4 cuboid (D2) flip variants
+            # of the GT rotation. Enables full 9-DoF regression without
+            # penalizing physically identical 180-deg flipped poses.
+            from wilddet3d.ops.rotation import cuboid_symmetry_rotation_6d
+
+            gt_variants = cuboid_symmetry_rotation_6d(
+                target_boxes_3d_encoded[:, 6:12]
+            )  # (N, 4, 6)
+            pred_rot = src_boxes_3d[:, 6:12].unsqueeze(1)  # (N, 1, 6)
+            per_variant = (pred_rot - gt_variants).abs().sum(-1)  # (N, 4)
+            min_idx = per_variant.argmin(dim=1)  # (N,)
+            best_gt = gt_variants[
+                torch.arange(gt_variants.shape[0], device=min_idx.device),
+                min_idx,
+            ]  # (N, 6)
+            loss_rot = l1_loss(
+                src_boxes_3d[:, 6:12],
+                best_gt,
+                reducer=SumWeightedLoss(
+                    weight=weights_3d[:, 6:12], avg_factor=num_boxes.item()
+                ),
+            )
+        else:
+            loss_rot = l1_loss(
+                src_boxes_3d[:, 6:],
+                target_boxes_3d_encoded[:, 6:],
+                reducer=SumWeightedLoss(
+                    weight=weights_3d[:, 6:], avg_factor=num_boxes.item()
+                ),
+            )
         losses["loss_rot"] = loss_rot * self.config.loss_rot_weight
 
         return losses

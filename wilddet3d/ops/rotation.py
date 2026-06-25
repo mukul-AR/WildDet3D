@@ -134,6 +134,37 @@ def matrix_to_rotation_6d(matrix: Tensor) -> Tensor:
     return matrix[..., :2, :].clone().reshape(batch_dim + (6,))
 
 
+# Cuboid (D2) proper-rotation symmetry group as local-frame diagonal sign
+# matrices S = diag(s): R' = R @ S leaves a cuboid's geometry unchanged.
+# I, Rx(pi), Ry(pi), Rz(pi).
+_CUBOID_SYMMETRY_SIGNS = (
+    (1.0, 1.0, 1.0),
+    (1.0, -1.0, -1.0),
+    (-1.0, 1.0, -1.0),
+    (-1.0, -1.0, 1.0),
+)
+
+
+def cuboid_symmetry_rotation_6d(d6: Tensor) -> Tensor:
+    """All 4 cuboid-symmetric variants of a 6D rotation representation.
+
+    The 6D rep is the first two ROWS of R (see matrix_to_rotation_6d).
+    For a local-frame flip R' = R @ diag(s), every column j of R is
+    scaled by s[j], so each row is multiplied element-wise by s. The
+    variant 6D reps are therefore d6 * [s0, s1, s2, s0, s1, s2].
+
+    Args:
+        d6: 6D rotations, shape [..., 6].
+
+    Returns:
+        Tensor of shape [..., 4, 6] with the 4 symmetric variants
+        (identity variant first).
+    """
+    signs = d6.new_tensor(_CUBOID_SYMMETRY_SIGNS)  # [4, 3]
+    patterns = torch.cat([signs, signs], dim=-1)  # [4, 6]
+    return d6.unsqueeze(-2) * patterns
+
+
 def R_from_allocentric(K: Tensor, R_view, u=None, v=None):
     """Convert rotation matrix to egocentric representation."""
     fx = K[:, 0, 0]

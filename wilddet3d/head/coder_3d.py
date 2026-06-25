@@ -74,8 +74,8 @@ def _normalize_canonical(
     """
     import math
 
-    poses_out = poses.clone()
-    dims_out = dims.clone()
+    poses_out = poses.clone().contiguous()
+    dims_out = dims.clone().contiguous()
 
     # Step 1: Force W <= L
     # dims = [W, L, H], indices 0, 1, 2
@@ -120,13 +120,37 @@ class Det3DCoder:
         orientation: str = "rotation_6d",
         ambiguous_rotation: bool = False,
         canonical_rotation: bool = False,
+        symmetry: str = "none",
     ) -> None:
-        """Initialize the 3D box coder."""
+        """Initialize the 3D box coder.
+
+        Args:
+            symmetry: Object symmetry group for the rotation loss.
+                "none": plain L1 on rot_6d (default).
+                "cuboid": D2 group (4 local-frame pi-flips). The loss takes
+                    the min over symmetric GT variants, enabling full 9-DoF
+                    regression without 180-deg ambiguity penalties. Use
+                    INSTEAD of canonical_rotation/ambiguous_rotation.
+        """
         self.center_scale = center_scale
         self.depth_scale = depth_scale
         self.dim_scale = dim_scale
         self.ambiguous_rotation = ambiguous_rotation
         self.canonical_rotation = canonical_rotation
+        assert symmetry in {"none", "cuboid"}, f"Invalid symmetry {symmetry}."
+        self.symmetry = symmetry
+        if symmetry != "none":
+            assert not (canonical_rotation or ambiguous_rotation), (
+                "symmetry-aware loss replaces canonical/ambiguous rotation "
+                "normalization; do not enable both."
+            )
+            assert orientation == "rotation_6d", (
+                "symmetry-aware loss requires rotation_6d orientation."
+            )
+            print(
+                f"[Det3DCoder] symmetry={symmetry}: full 9-DoF rotation "
+                "with symmetry-aware (min over flips) rotation loss"
+            )
         if canonical_rotation:
             print(
                 "[Det3DCoder] canonical_rotation=True: "

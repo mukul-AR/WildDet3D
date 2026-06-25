@@ -127,6 +127,7 @@ def get_wilddet3d_cfg(
     use_presence_score: bool = False,
     ambiguous_rotation: bool = False,
     canonical_rotation: bool = False,
+    symmetry: str = "none",
 ) -> tuple[ConfigDict, ConfigDict]:
     """Get WildDet3D model configuration.
 
@@ -143,6 +144,10 @@ def get_wilddet3d_cfg(
             range to eliminate 180-degree rotation ambiguity.
         canonical_rotation: If True, normalize dims to W<=L and yaw
             to [0, pi) for canonical rotation representation.
+        symmetry: Object symmetry for rotation loss ("none" or "cuboid").
+            "cuboid" enables full 9-DoF rotation with a symmetry-aware
+            (min over 4 pi-flips) loss; mutually exclusive with
+            canonical/ambiguous rotation.
 
     Returns:
         Tuple of (model_cfg, box_coder_cfg).
@@ -152,6 +157,7 @@ def get_wilddet3d_cfg(
         Det3DCoder,
         ambiguous_rotation=ambiguous_rotation,
         canonical_rotation=canonical_rotation,
+        symmetry=symmetry,
     )
 
     # Note: bbox3d_head is NOT created here - let WildDet3D create it automatically
