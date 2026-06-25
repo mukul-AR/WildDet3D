@@ -78,7 +78,10 @@ WORKERS_PER_GPU = _env_int("WD3D_WORKERS", 4)
 ACCUM = _env_int("WD3D_ACCUM", 4)
 BASE_LR = _env_float("WD3D_LR", 2e-5)
 BACKBONE_FREEZE_BLOCKS = _env_int("WD3D_BACKBONE_FREEZE", 28)
-LINGBOT_ENCODER_FREEZE_BLOCKS = _env_int("WD3D_LINGBOT_FREEZE", 21)
+# Keep the LingBot depth encoder fully frozen by default (24/24 blocks): the
+# depth backbone is a strong geometric prior we don't want to disturb. Override
+# with WD3D_LINGBOT_FREEZE to thaw blocks if ever needed.
+LINGBOT_ENCODER_FREEZE_BLOCKS = _env_int("WD3D_LINGBOT_FREEZE", 24)
 LIMIT_TRAIN_BATCHES = _env_float("WD3D_LIMIT_TRAIN_BATCHES", 1.0)
 
 ANYWARE_DATA_ROOT = "data/anyware_scenes"
@@ -205,4 +208,20 @@ def get_config() -> ExperimentConfig:
     final.pl_trainer.limit_val_batches = 0.0
     final.pl_trainer.check_val_every_n_epoch = NUM_EPOCHS + 1
     final.pl_trainer.val_check_interval = 1.0
+
+    # ---- Weights & Biases (opt-in via WD3D_WANDB=1; needs WANDB_API_KEY) ----
+    # vis4d routes pl_module.log(...) metrics to trainer.logger, so injecting a
+    # WandbLogger here streams all losses/metrics to W&B. Project/entity from
+    # env so no secrets are committed.
+    if os.environ.get("WD3D_WANDB", "0") == "1":
+        from lightning.pytorch.loggers import WandbLogger
+
+        final.pl_trainer.logger = class_config(
+            WandbLogger,
+            project=os.environ.get("WD3D_WANDB_PROJECT", "jenga-9dof"),
+            entity=os.environ.get("WD3D_WANDB_ENTITY", "mukul-ganwal") or None,
+            name=os.environ.get("WD3D_RUN_NAME", "jenga-stage5"),
+            save_dir="vis4d-workspace",
+            tags=["jenga", "stage5", "9dof", "wilddet3d"],
+        )
     return final

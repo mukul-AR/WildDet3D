@@ -70,6 +70,12 @@ def main() -> None:
     ap.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--out", default="ckpt/dense_9dof")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--wandb", action=argparse.BooleanOptionalAction,
+                    default=os.environ.get("WD3D_WANDB", "0") == "1",
+                    help="log to Weights & Biases (needs WANDB_API_KEY).")
+    ap.add_argument("--wandb-project", default=os.environ.get("WD3D_WANDB_PROJECT", "jenga-9dof"))
+    ap.add_argument("--wandb-entity", default=os.environ.get("WD3D_WANDB_ENTITY", "mukul-ganwal"))
+    ap.add_argument("--wandb-run-name", default=os.environ.get("WD3D_RUN_NAME", "jenga-dense"))
     args = ap.parse_args()
 
     ds = DenseAnywareDataset(args.data_root, "train", args.size, args.max_scenes)
@@ -95,7 +101,21 @@ def main() -> None:
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
 
+    wb = None
+    if args.wandb:
+        import wandb
+
+        wb = wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity or None,
+            name=args.wandb_run_name,
+            config=vars(args),
+            tags=["jenga", "dense", "9dof", "prompt-free"],
+        )
+        print(f"[wandb] logging to {args.wandb_project} as '{args.wandb_run_name}'")
+
     os.makedirs(args.out, exist_ok=True)
+    gstep = 0
     for epoch in range(args.epochs):
         model.train()
         t0 = time.time()
@@ -119,6 +139,23 @@ def main() -> None:
             agg["rot_deg"] += losses["rot_deg"].item()
             agg["npos"] += losses["num_pos"].item()
             agg["n"] += 1
+            gstep += 1
+            if wb is not None:
+                wb.log(
+                    {
+                        "train/loss": losses["total"].item(),
+                        "train/heatmap": losses["heatmap"].item(),
+                        "train/offset": losses["offset"].item(),
+                        "train/depth": losses["depth"].item(),
+                        "train/size": losses["size"].item(),
+                        "train/rot": losses["rot"].item(),
+                        "train/rot_deg": losses["rot_deg"].item(),
+                        "train/num_pos": losses["num_pos"].item(),
+                        "lr": opt.param_groups[0]["lr"],
+                        "epoch": epoch + 1,
+                    },
+                    step=gstep,
+                )
         sched.step()
         n = max(agg["n"], 1)
         print(
@@ -127,11 +164,23 @@ def main() -> None:
             f"pos/iter {agg['npos']/n:.0f} | {time.time()-t0:.0f}s",
             flush=True,
         )
+        if wb is not None:
+            wb.log(
+                {
+                    "epoch/loss": agg["total"] / n,
+                    "epoch/heatmap": agg["hm"] / n,
+                    "epoch/rot_deg": agg["rot_deg"] / n,
+                    "epoch": epoch + 1,
+                },
+                step=gstep,
+            )
         torch.save(
             {"model": model.state_dict(), "epoch": epoch + 1, "args": vars(args)},
             os.path.join(args.out, "dense_9dof_last.pt"),
         )
     print(f"saved -> {os.path.join(args.out, 'dense_9dof_last.pt')}")
+    if wb is not None:
+        wb.finish()
 
 
 if __name__ == "__main__":

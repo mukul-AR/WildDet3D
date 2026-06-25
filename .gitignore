@@ -16,3 +16,6 @@ third_party/moge/
 
 # Python venv (full WildDet3D training env, see scripts/setup_venv.sh)
 .venv/
+
+# Weights & Biases local run cache
+wandb/
