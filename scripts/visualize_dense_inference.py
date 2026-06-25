@@ -71,6 +71,8 @@ def main() -> None:
     ap.add_argument("--dense-ckpt", default="ckpt/dense_9dof/dense_9dof_last.pt")
     ap.add_argument("--base-ckpt", default="ckpt/wilddet3d_stage5_anyware_9dof_2ep.ckpt")
     ap.add_argument("--data-root", default="data/anyware_scenes")
+    ap.add_argument("--sim-root", default="", help="visualize sim scenes (.../scenes/synth) instead of COCO")
+    ap.add_argument("--sim-target", default="actual", choices=["actual", "visible"])
     ap.add_argument("--split", default="val")
     ap.add_argument("--num-images", type=int, default=6)
     ap.add_argument("--score-thresh", type=float, default=0.3)
@@ -87,7 +89,12 @@ def main() -> None:
     model.load_state_dict(sd, strict=False)
     model.eval().cuda()
 
-    ds = DenseAnywareDataset(args.data_root, args.split, args.size)
+    if args.sim_root:
+        from wilddet3d.dense.sim_dataset import SimDenseDataset
+
+        ds = SimDenseDataset(args.sim_root, args.size, args.sim_target)
+    else:
+        ds = DenseAnywareDataset(args.data_root, args.split, args.size)
     os.makedirs(args.out, exist_ok=True)
 
     for idx in range(min(args.num_images, len(ds))):
