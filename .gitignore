@@ -13,3 +13,6 @@ pretrained/
 
 # Optional MoGe submodule location (see README installation)
 third_party/moge/
+
+# Python venv (full WildDet3D training env, see scripts/setup_venv.sh)
+.venv/

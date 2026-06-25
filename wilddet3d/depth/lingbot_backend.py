@@ -18,6 +18,7 @@ Camera loss: ray-based MSE (same approach as UniDepthV2).
 from __future__ import annotations
 
 import math
+import os
 
 import torch
 import torch.nn as nn
@@ -751,7 +752,7 @@ class LingbotDepthBackend(GeometryBackendBase):
                         level=4,
                         align_resolution=24,
                         num_patches=16,
-                        importance_sampling=False,
+                        sparsity_aware=False,
                     )
                     loss_l16, _ = affine_invariant_local_loss(
                         pred_points[i],
@@ -761,7 +762,7 @@ class LingbotDepthBackend(GeometryBackendBase):
                         level=16,
                         align_resolution=12,
                         num_patches=256,
-                        importance_sampling=False,
+                        sparsity_aware=False,
                     )
                     loss_e, _ = edge_loss(
                         pred_points[i], gt_points[i]
@@ -1168,16 +1169,23 @@ class LingbotDepthBackend(GeometryBackendBase):
                 neck_out_i, H_orig, W_orig
             )
 
-            # Compute losses at original resolution
-            losses_i = self._compute_losses(
-                depth_map_i,
-                dgt_i,
-                dm_i,
-                K_pred_i,
-                K_i,
-                orig_hw,
-                confidence_map=confidence_map_i,
-            )
+            # Compute losses at original resolution. Auxiliary depth
+            # supervision (MoGe affine/local/edge/mask); skippable via
+            # WD3D_SKIP_DEPTH_LOSS=1 to fit a single 24 GB GPU at 1008px
+            # (the depth encoder is mostly frozen and latents for fusion
+            # are still produced above).
+            if os.environ.get("WD3D_SKIP_DEPTH_LOSS", "0") == "1":
+                losses_i = {}
+            else:
+                losses_i = self._compute_losses(
+                    depth_map_i,
+                    dgt_i,
+                    dm_i,
+                    K_pred_i,
+                    K_i,
+                    orig_hw,
+                    confidence_map=confidence_map_i,
+                )
 
             # Accumulate losses
             for key, val in losses_i.items():
