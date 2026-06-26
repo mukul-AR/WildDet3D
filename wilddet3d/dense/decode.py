@@ -112,7 +112,9 @@ def decode_jenga(stage1_dets, feat, stride, stage2, catalog, k):
         n = c.shape[0]
         assign = res["assign_logits"][0, :n].argmax(-1)
         sku = catalog[i][assign]  # [n, 3] ascending catalog dims
-        order = det["size"].argsort(dim=-1)  # axes ascending by visible extent
+        # arrange SKU dims by the model's PREDICTED per-axis order (learned
+        # dim->axis assignment), then snap to the catalog values for valid dims
+        order = res["log_size"][0, :n].argsort(dim=-1)  # axes ascending by predicted extent
         size = torch.zeros_like(sku).scatter_(1, order, sku)  # per-axis dims
         center = c + res["center_delta"][0, :n]
         R = det["R"]  # rotation inherited from the visible box

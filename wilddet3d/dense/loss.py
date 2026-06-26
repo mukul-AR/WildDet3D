@@ -6,8 +6,10 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+from wilddet3d.dense.metrics import box_corners
 from wilddet3d.dense.rotation_utils import (
     rad2deg,
+    rotation_6d_to_matrix,
     symmetry_chordal_loss,
     symmetry_min_geodesic,
 )
@@ -115,54 +117,71 @@ class DenseDet3DLoss(nn.Module):
 
 
 class JengaStage2Loss(nn.Module):
-    """Assignment CE + actual-center L1, masked per query.
+    """Assignment CE + center L1 + per-axis size L1 + corner-distance (ADD).
 
-    Rotation is inherited from the visible box (not predicted), so there is no
-    rotation term. ``out["center_delta"]`` is added to the per-query GT visible
-    center to form the predicted actual center (residual placement).
+    Rotation is inherited from the visible box (not predicted). Stage 2 predicts
+    the per-axis log-extents (``out["log_size"]``) — i.e. which SKU dim goes on
+    which inherited axis — and the actual-center residual. The **ADD** term
+    (mean corner-to-corner distance, fixed correspondence) supervises the dim->
+    axis assignment geometrically, where 3D IoU saturates on cube-ish boxes.
 
     Args:
         w_assign: catalog-assignment cross-entropy weight.
         w_center: actual-center L1 weight.
+        w_size: per-axis log-size L1 weight.
+        w_add: corner-distance (ADD) weight.
     """
 
-    def __init__(self, w_assign: float = 1.0, w_center: float = 1.0) -> None:
+    def __init__(
+        self, w_assign: float = 1.0, w_center: float = 1.0,
+        w_size: float = 1.0, w_add: float = 1.0,
+    ) -> None:
         super().__init__()
         self.w_assign, self.w_center = w_assign, w_center
+        self.w_size, self.w_add = w_size, w_add
 
     def forward(self, out: dict, batch: dict) -> dict:
         device = out["assign_logits"].device
-        logits, dc = out["assign_logits"], out["center_delta"]
+        logits, dc, lsz = out["assign_logits"], out["center_delta"], out["log_size"]
         b = logits.shape[0]
-        pa, pc, ta, tc = [], [], [], []
+        pa, pc, psz, pr, ta, tc, tsz, gr = [], [], [], [], [], [], [], []
         for i in range(b):
             n = int(out["q_mask"][i].sum())
             if n == 0:
                 continue
             pa.append(logits[i, :n])  # [n, K]
             pc.append(dc[i, :n] + batch["vis_center"][i].to(device))
+            psz.append(lsz[i, :n].exp())  # per-axis extents (m)
+            pr.append(batch["vis_rot6d"][i].to(device))  # inherited rotation
             ta.append(batch["assign"][i].to(device))
             tc.append(batch["act_center"][i].to(device))
+            tsz.append(batch["act_size"][i].to(device))  # native per-axis
+            gr.append(batch["act_rot6d"][i].to(device))
         if not pa:
             z = torch.zeros((), device=device)
             return {
-                "assign": z,
-                "center": z,
-                "total": z,
-                "assign_acc": z,
-                "num_q": torch.tensor(0.0, device=device),
+                "assign": z, "center": z, "size": z, "add": z, "total": z,
+                "assign_acc": z, "num_q": torch.tensor(0.0, device=device),
             }
         pa_c, ta_c = torch.cat(pa), torch.cat(ta)
         pc_c, tc_c = torch.cat(pc), torch.cat(tc)
+        psz_c, tsz_c = torch.cat(psz), torch.cat(tsz)
+        pr_c, gr_c = torch.cat(pr), torch.cat(gr)
+
         loss_assign = F.cross_entropy(pa_c, ta_c)
         loss_center = (pc_c - tc_c).abs().mean()
-        total = self.w_assign * loss_assign + self.w_center * loss_center
+        loss_size = (psz_c.clamp_min(1e-3).log() - tsz_c.clamp_min(1e-3).log()).abs().mean()
+        cp = box_corners(pc_c, psz_c, rotation_6d_to_matrix(pr_c))
+        cg = box_corners(tc_c, tsz_c, rotation_6d_to_matrix(gr_c))
+        loss_add = (cp - cg).norm(dim=-1).mean()
+        total = (
+            self.w_assign * loss_assign + self.w_center * loss_center
+            + self.w_size * loss_size + self.w_add * loss_add
+        )
         with torch.no_grad():
             acc = (pa_c.argmax(-1) == ta_c).float().mean()
         return {
-            "assign": loss_assign,
-            "center": loss_center,
-            "total": total,
-            "assign_acc": acc,
+            "assign": loss_assign, "center": loss_center, "size": loss_size,
+            "add": loss_add, "total": total, "assign_acc": acc,
             "num_q": torch.tensor(float(ta_c.numel()), device=device),
         }

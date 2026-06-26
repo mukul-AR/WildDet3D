@@ -19,6 +19,7 @@ def test_perfect_prediction_scores_iou_one():
     out = {
         "assign_logits": logits,
         "center_delta": (act_center - vis_center)[None],  # [1,2,3]
+        "log_size": act_size.log()[None],  # predicted per-axis order == GT
         "q_mask": torch.ones(1, 2, dtype=torch.bool),
     }
     batch = {

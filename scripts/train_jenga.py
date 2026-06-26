@@ -118,6 +118,8 @@ def main() -> None:
     ap.add_argument("--heads", type=int, default=8)
     ap.add_argument("--w-assign", type=float, default=1.0)
     ap.add_argument("--w-center", type=float, default=1.0)
+    ap.add_argument("--w-size", type=float, default=1.0, help="Stage-2 per-axis log-size L1")
+    ap.add_argument("--w-add", type=float, default=1.0, help="Stage-2 corner-distance (ADD)")
     ap.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--out", default="ckpt/jenga")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -166,7 +168,7 @@ def main() -> None:
           flush=True)
 
     loss1_fn = DenseDet3DLoss()
-    loss2_fn = JengaStage2Loss(args.w_assign, args.w_center)
+    loss2_fn = JengaStage2Loss(args.w_assign, args.w_center, args.w_size, args.w_add)
     groups = [{"params": head_params, "lr": args.lr}]
     if sam_params:
         groups.append({"params": sam_params, "lr": args.encoder_lr})
@@ -230,6 +232,8 @@ def main() -> None:
                     "train/s1_rot_deg": l1["rot_deg"].item(),
                     "train/assign": l2["assign"].item(),
                     "train/center": l2["center"].item(),
+                    "train/size": l2["size"].item(),
+                    "train/add": l2["add"].item(),
                     "train/assign_acc": l2["assign_acc"].item(),
                     "lr": opt.param_groups[0]["lr"],
                     "epoch": epoch + 1,

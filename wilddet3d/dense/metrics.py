@@ -81,7 +81,7 @@ def stage2_eval_arrays(out: dict, batch: dict, n_samples: int = 4096) -> dict:
         cat = batch["catalog"][i].to(device).float()  # [K, 3]
         assign = out["assign_logits"][i, :n].float().argmax(-1)  # [n]
         sku = cat[assign]  # [n, 3] ascending
-        order = batch["vis_size"][i].to(device).float().argsort(dim=-1)  # axes asc
+        order = out["log_size"][i, :n].float().argsort(dim=-1)  # predicted per-axis order
         size_pred = torch.zeros_like(sku).scatter_(1, order, sku)  # per-axis
         center_pred = out["center_delta"][i, :n].float() + batch["vis_center"][i].to(device).float()
         r_pred = rotation_6d_to_matrix(batch["vis_rot6d"][i].to(device).float())  # inherited

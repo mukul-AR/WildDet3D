@@ -8,6 +8,8 @@ variable per-scene query- and dim-counts via padding + attention masks.
 """
 from __future__ import annotations
 
+import math
+
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
@@ -77,11 +79,17 @@ class JengaStage2(nn.Module):
         )
         self.q_to_assign = nn.Linear(d_model, d_model)
         self.k_to_assign = nn.Linear(d_model, d_model)
-        # Rotation is inherited from the visible box (not predicted); the head
-        # only places the actual center.
-        self.center_head = nn.Sequential(
-            nn.Linear(d_model, d_model), nn.GELU(), nn.Linear(d_model, 3)
+        # Rotation is inherited from the visible box (not predicted). The head
+        # places the actual center (3) and the per-axis log-extents (3) along the
+        # inherited axes — the per-axis extents *are* the learned dim->axis
+        # assignment (which axis is the long/short/depth one).
+        self.pose_head = nn.Sequential(
+            nn.Linear(d_model, d_model), nn.GELU(), nn.Linear(d_model, 6)
         )
+        nn.init.zeros_(self.pose_head[-1].weight)
+        nn.init.zeros_(self.pose_head[-1].bias)
+        with torch.no_grad():
+            self.pose_head[-1].bias[3:6] = math.log(0.3)  # ~0.3 m initial extents
 
     @staticmethod
     def _sample_feat(feat: Tensor, uv: Tensor) -> Tensor:
@@ -122,9 +130,11 @@ class JengaStage2(nn.Module):
         ka = self.k_to_assign(kv)  # [B,Kmax,d]
         logits = torch.einsum("bqd,bkd->bqk", qa, ka) / (self.d_model ** 0.5)
         logits = logits.masked_fill(~k_mask[:, None, :], float("-inf"))
+        pose = self.pose_head(q)
         return {
             "assign_logits": logits,
-            "center_delta": self.center_head(q),
+            "center_delta": pose[..., :3],
+            "log_size": pose[..., 3:],
             "q_mask": q_mask,
             "k_mask": k_mask,
         }
