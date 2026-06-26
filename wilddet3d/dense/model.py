@@ -9,6 +9,8 @@ features. No prompts, no text, no per-object input.
 
 from __future__ import annotations
 
+import contextlib
+
 import torch
 from torch import Tensor, nn
 
@@ -37,6 +39,7 @@ class DenseDet3D(nn.Module):
         fpn_level: int = 1,
         in_ch: int = 256,
         train_fusion: bool = True,
+        train_encoders: bool = False,
         head_kwargs: dict | None = None,
     ) -> None:
         super().__init__()
@@ -45,12 +48,16 @@ class DenseDet3D(nn.Module):
         self.early_depth_fusion = early_depth_fusion
         self.fpn_level = fpn_level
         self.train_fusion = train_fusion
+        self.train_encoders = train_encoders
         self.head = DenseConvHead(in_ch=in_ch, **(head_kwargs or {}))
 
+        # Encoders are frozen by default; when train_encoders is set they get
+        # gradients (low-LR fine-tune). They stay in eval() mode regardless
+        # (deterministic; LayerNorm needs no running stats) — see train().
         for p in self.backbone.parameters():
-            p.requires_grad_(False)
+            p.requires_grad_(train_encoders)
         for p in self.geometry_backend.parameters():
-            p.requires_grad_(False)
+            p.requires_grad_(train_encoders)
         if not train_fusion:
             for p in self.early_depth_fusion.parameters():
                 p.requires_grad_(False)
@@ -76,9 +83,14 @@ class DenseDet3D(nn.Module):
         return (images_01 - 0.5) / 0.5
 
     def _fused_feats(self, images: Tensor, depth: Tensor, k: Tensor) -> list[Tensor]:
-        """Frozen encoders + depth fusion -> list of fused FPN levels."""
+        """Encoders + depth fusion -> list of fused FPN levels.
+
+        Encoder forward runs under ``no_grad`` when frozen; under grad when
+        ``train_encoders`` is set (low-LR fine-tune).
+        """
         _, _, h, w = images.shape
-        with torch.no_grad():
+        grad_ctx = contextlib.nullcontext() if self.train_encoders else torch.no_grad()
+        with grad_ctx:
             backbone_out = self.backbone.forward_image(self._to_sam3(images))
             geom = self.geometry_backend(
                 images=images,
@@ -123,6 +135,7 @@ class DenseDet3D(nn.Module):
         ckpt_path: str | None = None,
         fpn_level: int = 1,
         train_fusion: bool = True,
+        train_encoders: bool = False,
         head_kwargs: dict | None = None,
         device: str = "cuda",
     ) -> "DenseDet3D":
@@ -182,6 +195,7 @@ class DenseDet3D(nn.Module):
             early_depth_fusion=wd.early_depth_fusion,
             fpn_level=fpn_level,
             train_fusion=train_fusion,
+            train_encoders=train_encoders,
             head_kwargs=head_kwargs,
         )
         del wd
