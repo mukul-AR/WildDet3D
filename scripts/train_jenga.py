@@ -76,7 +76,7 @@ def validate(model, stage2, loader, loss2_fn, size, device, amp, n_samples=2048)
     """Teacher-forced val metrics: 3D IoU + center / size / assign / overlap."""
     model.eval()
     stage2.eval()
-    keys = ("iou", "center_dist", "size_err", "correct", "overlap")
+    keys = ("iou", "center_dist", "size_err", "corner_add", "corner_adds", "correct", "overlap")
     acc = {k: [] for k in keys}
     for batch in loader:
         batch = move(batch, device)
@@ -244,8 +244,8 @@ def main() -> None:
         if val:
             msg += (f" || val iou {val.get('iou3d', 0):.3f} "
                     f"(@.5 {val.get('iou_50', 0):.2f} @.75 {val.get('iou_75', 0):.2f}) "
-                    f"acc {val.get('assign_acc', 0):.3f} ctr {val.get('center_dist', 0):.3f} "
-                    f"ovlp {val.get('overlap_frac', 0):.3f}")
+                    f"ADD {val.get('corner_add', 0)*100:.1f}cm acc {val.get('assign_acc', 0):.3f} "
+                    f"ctr {val.get('center_dist', 0):.3f} ovlp {val.get('overlap_frac', 0):.3f}")
         print(msg, flush=True)
         if wb is not None:
             log = {"epoch/total": agg["total"] / n, "epoch/assign_acc": agg["acc"] / n,

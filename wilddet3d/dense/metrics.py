@@ -106,10 +106,16 @@ def stage2_eval_arrays(out: dict, batch: dict, n_samples: int = 4096) -> dict:
         return {"iou": z, "center_dist": z, "size_err": z, "correct": z, "overlap": z}
     pc_, ps_, pr_ = torch.cat(pc), torch.cat(ps), torch.cat(pr)
     gc_, gs_, gr_ = torch.cat(gc), torch.cat(gs), torch.cat(gr)
+    cp = box_corners(pc_, ps_, pr_)  # [N, 8, 3]
+    cg = box_corners(gc_, gs_, gr_)
+    add = (cp - cg).norm(dim=-1).mean(dim=-1)  # fixed correspondence -> orientation-sensitive
+    adds = torch.cdist(cp, cg).min(dim=2).values.mean(dim=-1)  # nearest corner -> symmetry-tolerant
     return {
         "iou": iou3d_mc(pc_, ps_, pr_, gc_, gs_, gr_, n_samples),
         "center_dist": (pc_ - gc_).norm(dim=-1),
         "size_err": (ps_ - gs_).abs().sum(-1),
+        "corner_add": add,
+        "corner_adds": adds,
         "correct": torch.cat(correct),
         "overlap": torch.cat(overlaps) if overlaps else torch.zeros(0, device=device),
     }
@@ -126,6 +132,8 @@ def summarize_eval(arrays: dict) -> dict:
         "iou_75": (iou > 0.75).float().mean().item(),
         "center_dist": arrays["center_dist"].mean().item(),
         "size_err": arrays["size_err"].mean().item(),
+        "corner_add": arrays["corner_add"].mean().item(),
+        "corner_adds": arrays["corner_adds"].mean().item(),
         "assign_acc": arrays["correct"].mean().item(),
         "overlap_frac": (ov > 0.05).float().mean().item() if ov.numel() else 0.0,
         "n_boxes": int(iou.numel()),

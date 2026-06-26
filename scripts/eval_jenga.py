@@ -94,7 +94,7 @@ def main() -> None:
     model.eval()
     stage2.eval()
 
-    keys = ("iou", "center_dist", "size_err", "correct", "overlap")
+    keys = ("iou", "center_dist", "size_err", "corner_add", "corner_adds", "correct", "overlap")
     acc = {k: [] for k in keys}
     for batch in loader:
         batch = move(batch, args.device)
@@ -118,6 +118,8 @@ def main() -> None:
     print(f"  assignment accuracy : {s.get('assign_acc', 0):.4f}")
     print(f"  actual-center dist  : {s.get('center_dist', 0)*100:.2f} cm")
     print(f"  size error (L1 sum) : {s.get('size_err', 0)*100:.2f} cm")
+    print(f"  corner ADD / ADD-S  : {s.get('corner_add', 0)*100:.2f} / "
+          f"{s.get('corner_adds', 0)*100:.2f} cm   [orientation-sensitive]")
     print("  rotation error      : 0.00 deg (inherited from the visible box)")
     print(f"  pairwise overlap    : {s.get('overlap_frac', 0)*100:.2f}% of box-pairs intersect")
     print("=====================================================================\n")

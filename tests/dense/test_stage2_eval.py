@@ -38,4 +38,5 @@ def test_perfect_prediction_scores_iou_one():
     assert s["iou3d"] > 0.97
     assert s["center_dist"] < 1e-3
     assert s["size_err"] < 1e-3
+    assert s["corner_add"] < 1e-3 and s["corner_adds"] < 1e-3
     assert s["n_boxes"] == 2
