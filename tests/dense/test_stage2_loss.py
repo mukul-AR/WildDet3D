@@ -19,6 +19,10 @@ def _fake(b=2, q=3, k=4):
             torch.tensor([[1.0, 0, 0, 0, 1, 0]] * 2),
         ],
         "assign": [torch.tensor([0, 1, 2]), torch.tensor([3, 0])],
+        "act_size": [
+            torch.tensor([[0.3, 0.3, 0.5]] * 3),
+            torch.tensor([[0.2, 0.3, 0.4]] * 2),
+        ],
     }
     return out, batch
 

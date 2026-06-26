@@ -8,8 +8,8 @@ from torch.nn import functional as F
 
 from wilddet3d.dense.rotation_utils import (
     rad2deg,
-    symmetry_chordal_loss,
-    symmetry_min_geodesic,
+    sized_symmetry_chordal_loss,
+    sized_symmetry_min_geodesic,
 )
 
 
@@ -87,8 +87,9 @@ class DenseDet3DLoss(nn.Module):
         loss_off = (reg_pred[:, 0:2] - reg_tgt[:, 0:2]).abs().mean()
         loss_depth = (reg_pred[:, 2] - reg_tgt[:, 2]).abs().mean()
         loss_size = (reg_pred[:, 3:6] - reg_tgt[:, 3:6]).abs().mean()
-        loss_rot = symmetry_chordal_loss(
-            reg_pred[:, 6:12], reg_tgt[:, 6:12]
+        size = reg_tgt[:, 3:6].exp()  # box extents for size-aware symmetry
+        loss_rot = sized_symmetry_chordal_loss(
+            reg_pred[:, 6:12], reg_tgt[:, 6:12], size
         ).mean()
 
         total = (
@@ -100,7 +101,7 @@ class DenseDet3DLoss(nn.Module):
         )
         with torch.no_grad():
             rot_deg = rad2deg(
-                symmetry_min_geodesic(reg_pred[:, 6:12], reg_tgt[:, 6:12])
+                sized_symmetry_min_geodesic(reg_pred[:, 6:12], reg_tgt[:, 6:12], size)
             ).mean()
         return {
             "heatmap": loss_hm,
@@ -136,7 +137,7 @@ class JengaStage2Loss(nn.Module):
         device = out["assign_logits"].device
         logits, dc, rot6 = out["assign_logits"], out["center_delta"], out["rot6d"]
         b = logits.shape[0]
-        pa, pc, pr, ta, tc, tr = [], [], [], [], [], []
+        pa, pc, pr, ta, tc, tr, ts = [], [], [], [], [], [], []
         for i in range(b):
             n = int(out["q_mask"][i].sum())
             if n == 0:
@@ -147,6 +148,7 @@ class JengaStage2Loss(nn.Module):
             ta.append(batch["assign"][i].to(device))
             tc.append(batch["act_center"][i].to(device))
             tr.append(batch["act_rot6d"][i].to(device))
+            ts.append(batch["act_size"][i].to(device))
         if not pa:
             z = torch.zeros((), device=device)
             return {
@@ -160,10 +162,10 @@ class JengaStage2Loss(nn.Module):
             }
         pa_c, ta_c = torch.cat(pa), torch.cat(ta)
         pc_c, tc_c = torch.cat(pc), torch.cat(tc)
-        pr_c, tr_c = torch.cat(pr), torch.cat(tr)
+        pr_c, tr_c, ts_c = torch.cat(pr), torch.cat(tr), torch.cat(ts)
         loss_assign = F.cross_entropy(pa_c, ta_c)
         loss_center = (pc_c - tc_c).abs().mean()
-        loss_rot = symmetry_chordal_loss(pr_c, tr_c).mean()
+        loss_rot = sized_symmetry_chordal_loss(pr_c, tr_c, ts_c).mean()
         total = (
             self.w_assign * loss_assign
             + self.w_center * loss_center
@@ -171,7 +173,7 @@ class JengaStage2Loss(nn.Module):
         )
         with torch.no_grad():
             acc = (pa_c.argmax(-1) == ta_c).float().mean()
-            rot_deg = rad2deg(symmetry_min_geodesic(pr_c, tr_c)).mean()
+            rot_deg = rad2deg(sized_symmetry_min_geodesic(pr_c, tr_c, ts_c)).mean()
         return {
             "assign": loss_assign,
             "center": loss_center,
