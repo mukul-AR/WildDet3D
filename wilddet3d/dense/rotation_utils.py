@@ -131,3 +131,76 @@ def symmetry_chordal_loss(d6_pred: Tensor, d6_gt: Tensor) -> Tensor:
     diff = r_pred.unsqueeze(1) - r_var  # [N, 4, 3, 3]
     chordal = diff.pow(2).sum(dim=(-1, -2))  # [N, 4]
     return chordal.min(dim=1).values  # [N]
+
+
+def _octahedral_rotations() -> Tensor:
+    """The 24 proper rotations of a cube as signed permutation matrices ``[24,3,3]``.
+
+    These are every 3x3 signed-permutation matrix with determinant +1; they form
+    the full cuboid symmetry supergroup. The size-aware functions below select,
+    per box, the subset that actually preserves its geometry.
+    """
+    import itertools
+
+    mats = []
+    for perm in itertools.permutations(range(3)):
+        p = torch.zeros(3, 3)
+        for i, j in enumerate(perm):
+            p[i, j] = 1.0
+        for s in itertools.product((1.0, -1.0), repeat=3):
+            m = p * torch.tensor(s)  # scale columns
+            if round(torch.det(m).item()) == 1:
+                mats.append(m)
+    return torch.stack(mats)  # [24, 3, 3]
+
+
+_OCTAHEDRAL = _octahedral_rotations()
+
+
+def _sized_symmetry_variants(
+    r_gt: Tensor, size: Tensor, tol: float = 1e-3
+) -> tuple[Tensor, Tensor]:
+    """Per-box symmetry-rotated GT + validity mask, sized by equal-extent axes.
+
+    A cube rotation ``S`` preserves a box iff its permutation only swaps
+    equal-length axes, i.e. ``|S| @ size == size``. Generic boxes -> 4 valid
+    (D2), square cross-section -> 8 (D4), cube -> 24.
+
+    Args:
+        r_gt: GT rotations ``[N, 3, 3]``.
+        size: box extents ``[N, 3]`` (any axis order; only equalities matter).
+        tol: absolute tolerance for treating two extents as equal.
+
+    Returns:
+        variants ``[N, 24, 3, 3]`` (``r_gt @ S``) and bool mask ``[N, 24]``.
+    """
+    octa = _OCTAHEDRAL.to(r_gt)  # [24, 3, 3]
+    variants = torch.einsum("nij,sjk->nsik", r_gt, octa)  # [N, 24, 3, 3]
+    perm = octa.abs()  # permutation matrices [24, 3, 3]
+    permuted = torch.einsum("sij,nj->nsi", perm, size)  # [N, 24, 3]
+    mask = (permuted - size.unsqueeze(1)).abs().le(tol).all(dim=-1)  # [N, 24]
+    return variants, mask
+
+
+def sized_symmetry_chordal_loss(
+    d6_pred: Tensor, d6_gt: Tensor, size: Tensor, tol: float = 1e-3
+) -> Tensor:
+    """Chordal rotation loss minimised over the box's *size-aware* symmetry group."""
+    r_pred = rotation_6d_to_matrix(d6_pred)  # [N, 3, 3]
+    r_gt = rotation_6d_to_matrix(d6_gt)
+    variants, mask = _sized_symmetry_variants(r_gt, size, tol)  # [N,24,3,3], [N,24]
+    chordal = (r_pred.unsqueeze(1) - variants).pow(2).sum(dim=(-1, -2))  # [N, 24]
+    chordal = chordal.masked_fill(~mask, float("inf"))
+    return chordal.min(dim=1).values  # [N]
+
+
+def sized_symmetry_min_geodesic(
+    d6_pred: Tensor, d6_gt: Tensor, size: Tensor, tol: float = 1e-3
+) -> Tensor:
+    """Min geodesic angle (radians) over the box's size-aware symmetry group (metric)."""
+    r_pred = rotation_6d_to_matrix(d6_pred)  # [N, 3, 3]
+    r_gt = rotation_6d_to_matrix(d6_gt)
+    variants, mask = _sized_symmetry_variants(r_gt, size, tol)  # [N,24,3,3], [N,24]
+    angles = geodesic_angle(r_pred.unsqueeze(1), variants)  # [N, 24] (broadcast)
+    angles = angles.masked_fill(~mask, float("inf"))
+    return angles.min(dim=1).values  # [N]
