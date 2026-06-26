@@ -40,6 +40,7 @@ class DenseDet3D(nn.Module):
         in_ch: int = 256,
         train_fusion: bool = True,
         train_encoders: bool = False,
+        train_depth_encoder: bool = False,
         head_kwargs: dict | None = None,
     ) -> None:
         super().__init__()
@@ -48,16 +49,17 @@ class DenseDet3D(nn.Module):
         self.early_depth_fusion = early_depth_fusion
         self.fpn_level = fpn_level
         self.train_fusion = train_fusion
-        self.train_encoders = train_encoders
+        self.train_encoders = train_encoders  # SAM3 RGB backbone
+        self.train_depth_encoder = train_depth_encoder  # LingBot depth backbone
         self.head = DenseConvHead(in_ch=in_ch, **(head_kwargs or {}))
 
-        # Encoders are frozen by default; when train_encoders is set they get
-        # gradients (low-LR fine-tune). They stay in eval() mode regardless
-        # (deterministic; LayerNorm needs no running stats) — see train().
+        # Each encoder is frozen by default and can be unfrozen independently for
+        # a low-LR fine-tune. They stay in eval() mode regardless (deterministic;
+        # LayerNorm needs no running stats) — see train().
         for p in self.backbone.parameters():
             p.requires_grad_(train_encoders)
         for p in self.geometry_backend.parameters():
-            p.requires_grad_(train_encoders)
+            p.requires_grad_(train_depth_encoder)
         if not train_fusion:
             for p in self.early_depth_fusion.parameters():
                 p.requires_grad_(False)
@@ -89,9 +91,11 @@ class DenseDet3D(nn.Module):
         ``train_encoders`` is set (low-LR fine-tune).
         """
         _, _, h, w = images.shape
-        grad_ctx = contextlib.nullcontext() if self.train_encoders else torch.no_grad()
-        with grad_ctx:
+        sam_ctx = contextlib.nullcontext() if self.train_encoders else torch.no_grad()
+        dep_ctx = contextlib.nullcontext() if self.train_depth_encoder else torch.no_grad()
+        with sam_ctx:
             backbone_out = self.backbone.forward_image(self._to_sam3(images))
+        with dep_ctx:
             geom = self.geometry_backend(
                 images=images,
                 depth_feats=None,
@@ -136,6 +140,7 @@ class DenseDet3D(nn.Module):
         fpn_level: int = 1,
         train_fusion: bool = True,
         train_encoders: bool = False,
+        train_depth_encoder: bool = False,
         head_kwargs: dict | None = None,
         device: str = "cuda",
     ) -> "DenseDet3D":
@@ -196,6 +201,7 @@ class DenseDet3D(nn.Module):
             fpn_level=fpn_level,
             train_fusion=train_fusion,
             train_encoders=train_encoders,
+            train_depth_encoder=train_depth_encoder,
             head_kwargs=head_kwargs,
         )
         del wd

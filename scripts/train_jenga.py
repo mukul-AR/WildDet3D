@@ -105,7 +105,9 @@ def main() -> None:
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--encoder-lr", type=float, default=0.0,
-                    help="if > 0, unfreeze SAM3 + depth encoders and fine-tune them at this LR")
+                    help="if > 0, unfreeze the SAM3 (RGB) backbone and fine-tune it at this LR")
+    ap.add_argument("--depth-encoder-lr", type=float, default=0.0,
+                    help="if > 0, unfreeze the LingBot depth backbone at this LR (default: frozen)")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--fpn-level", type=int, default=1)
     ap.add_argument("--size", type=int, default=1008)
@@ -141,31 +143,35 @@ def main() -> None:
     ckpt = args.wilddet3d_ckpt if os.path.exists(args.wilddet3d_ckpt) else None
     if ckpt is None:
         print(f"WARN: {args.wilddet3d_ckpt} not found; encoders use base weights.")
-    unfreeze = args.encoder_lr > 0
     model = DenseDet3D.from_wilddet3d(
         ckpt_path=ckpt, fpn_level=args.fpn_level, train_fusion=True,
-        train_encoders=unfreeze, device=args.device)
+        train_encoders=args.encoder_lr > 0,
+        train_depth_encoder=args.depth_encoder_lr > 0, device=args.device)
     stage2 = JengaStage2(in_ch=256, d_model=args.d_model, layers=args.layers,
                          heads=args.heads).to(args.device)
 
-    # Encoder params (backbone + depth backend) get a separate low LR group;
+    # SAM3 (RGB) and the depth backbone each get their own LR group if unfrozen;
     # fusion + Stage-1 head + Stage-2 train at the head LR.
-    enc_ids = {id(p) for p in
-               list(model.backbone.parameters()) + list(model.geometry_backend.parameters())}
-    enc_params = [p for p in model.parameters() if p.requires_grad and id(p) in enc_ids]
-    head_params = [p for p in model.parameters() if p.requires_grad and id(p) not in enc_ids]
+    sam_ids = {id(p) for p in model.backbone.parameters()}
+    dep_ids = {id(p) for p in model.geometry_backend.parameters()}
+    sam_params = [p for p in model.backbone.parameters() if p.requires_grad]
+    dep_params = [p for p in model.geometry_backend.parameters() if p.requires_grad]
+    head_params = [p for p in model.parameters() if p.requires_grad
+                   and id(p) not in sam_ids and id(p) not in dep_ids]
     head_params += list(stage2.parameters())
-    trainable = head_params + enc_params
-    n_head = sum(p.numel() for p in head_params)
-    n_enc = sum(p.numel() for p in enc_params)
-    print(f"trainable params: head {n_head/1e6:.2f}M + encoders {n_enc/1e6:.2f}M "
-          f"(encoder_lr={args.encoder_lr})", flush=True)
+    trainable = head_params + sam_params + dep_params
+    print(f"trainable params: head {sum(p.numel() for p in head_params)/1e6:.2f}M"
+          f" + SAM3 {sum(p.numel() for p in sam_params)/1e6:.2f}M (lr {args.encoder_lr})"
+          f" + depth {sum(p.numel() for p in dep_params)/1e6:.2f}M (lr {args.depth_encoder_lr})",
+          flush=True)
 
     loss1_fn = DenseDet3DLoss()
     loss2_fn = JengaStage2Loss(args.w_assign, args.w_center)
     groups = [{"params": head_params, "lr": args.lr}]
-    if enc_params:
-        groups.append({"params": enc_params, "lr": args.encoder_lr})
+    if sam_params:
+        groups.append({"params": sam_params, "lr": args.encoder_lr})
+    if dep_params:
+        groups.append({"params": dep_params, "lr": args.depth_encoder_lr})
     opt = torch.optim.AdamW(groups, lr=args.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
