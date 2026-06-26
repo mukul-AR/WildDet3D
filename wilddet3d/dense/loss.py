@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 from torch import Tensor, nn
+from torch.nn import functional as F
 
 from wilddet3d.dense.rotation_utils import (
     rad2deg,
@@ -110,4 +111,73 @@ class DenseDet3DLoss(nn.Module):
             "total": total,
             "rot_deg": rot_deg,
             "num_pos": torch.tensor(float(n), device=device),
+        }
+
+
+class JengaStage2Loss(nn.Module):
+    """Assignment CE + actual-center L1 + symmetry-aware rotation, masked per query.
+
+    ``out["center_delta"]`` is added to the per-query GT visible center to form the
+    predicted actual center, so Stage 2 learns a residual completion.
+
+    Args:
+        w_assign: catalog-assignment cross-entropy weight.
+        w_center: actual-center L1 weight.
+        w_rot: symmetry-aware chordal rotation weight.
+    """
+
+    def __init__(
+        self, w_assign: float = 1.0, w_center: float = 1.0, w_rot: float = 1.0
+    ) -> None:
+        super().__init__()
+        self.w_assign, self.w_center, self.w_rot = w_assign, w_center, w_rot
+
+    def forward(self, out: dict, batch: dict) -> dict:
+        device = out["assign_logits"].device
+        logits, dc, rot6 = out["assign_logits"], out["center_delta"], out["rot6d"]
+        b = logits.shape[0]
+        pa, pc, pr, ta, tc, tr = [], [], [], [], [], []
+        for i in range(b):
+            n = int(out["q_mask"][i].sum())
+            if n == 0:
+                continue
+            pa.append(logits[i, :n])  # [n, K]
+            pc.append(dc[i, :n] + batch["vis_center"][i].to(device))
+            pr.append(rot6[i, :n])
+            ta.append(batch["assign"][i].to(device))
+            tc.append(batch["act_center"][i].to(device))
+            tr.append(batch["act_rot6d"][i].to(device))
+        if not pa:
+            z = torch.zeros((), device=device)
+            return {
+                "assign": z,
+                "center": z,
+                "rot": z,
+                "total": z,
+                "rot_deg": z,
+                "assign_acc": z,
+                "num_q": torch.tensor(0.0, device=device),
+            }
+        pa_c, ta_c = torch.cat(pa), torch.cat(ta)
+        pc_c, tc_c = torch.cat(pc), torch.cat(tc)
+        pr_c, tr_c = torch.cat(pr), torch.cat(tr)
+        loss_assign = F.cross_entropy(pa_c, ta_c)
+        loss_center = (pc_c - tc_c).abs().mean()
+        loss_rot = symmetry_chordal_loss(pr_c, tr_c).mean()
+        total = (
+            self.w_assign * loss_assign
+            + self.w_center * loss_center
+            + self.w_rot * loss_rot
+        )
+        with torch.no_grad():
+            acc = (pa_c.argmax(-1) == ta_c).float().mean()
+            rot_deg = rad2deg(symmetry_min_geodesic(pr_c, tr_c)).mean()
+        return {
+            "assign": loss_assign,
+            "center": loss_center,
+            "rot": loss_rot,
+            "total": total,
+            "rot_deg": rot_deg,
+            "assign_acc": acc,
+            "num_q": torch.tensor(float(ta_c.numel()), device=device),
         }
