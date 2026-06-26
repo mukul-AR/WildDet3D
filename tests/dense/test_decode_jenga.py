@@ -21,6 +21,10 @@ def test_decode_selects_catalog_dim_and_completes_pose():
     o = out[0]
     assert o["size"].shape == (2, 3) and o["center"].shape == (2, 3)
     assert o["R"].shape == (2, 3, 3)
-    # selected size must be an exact catalog row
+    # rotation is inherited from the visible detection
+    assert torch.allclose(o["R"], dets[0]["R"])
+    # the per-axis size is a (possibly reordered) catalog row -> sorted matches
+    cat_sorted = catalog[0].sort(dim=1).values
     for s in o["size"]:
-        assert torch.any(torch.all(torch.isclose(catalog[0], s, atol=1e-5), dim=1))
+        ss = s.sort().values
+        assert torch.any(torch.all(torch.isclose(cat_sorted, ss, atol=1e-5), dim=1))

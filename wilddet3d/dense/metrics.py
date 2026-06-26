@@ -61,9 +61,10 @@ def iou3d_mc(
 def stage2_eval_arrays(out: dict, batch: dict, n_samples: int = 4096) -> dict:
     """Per-query teacher-forced eval arrays for the Stage-2 actual-box outputs.
 
-    Reconstructs the predicted actual box (size = argmax-selected catalog dim,
-    center = visible center + predicted delta, R from predicted 6D) and the GT
-    actual box, 1:1 per query (no detection matching needed under teacher forcing).
+    Reconstructs the predicted actual box (rotation inherited from the visible
+    box; size = argmax-selected catalog SKU laid onto axes by visible per-axis
+    extent order; center = visible center + predicted delta) and the GT actual
+    box, 1:1 per query (no detection matching needed under teacher forcing).
 
     Returns 1D tensors: ``iou`` ``center_dist`` ``size_err`` ``correct`` (all
     ``[Q_total]``) and ``overlap`` (pairwise IoU among predicted actual boxes
@@ -79,9 +80,11 @@ def stage2_eval_arrays(out: dict, batch: dict, n_samples: int = 4096) -> dict:
             continue
         cat = batch["catalog"][i].to(device).float()  # [K, 3]
         assign = out["assign_logits"][i, :n].float().argmax(-1)  # [n]
-        size_pred = cat[assign]  # [n, 3]
+        sku = cat[assign]  # [n, 3] ascending
+        order = batch["vis_size"][i].to(device).float().argsort(dim=-1)  # axes asc
+        size_pred = torch.zeros_like(sku).scatter_(1, order, sku)  # per-axis
         center_pred = out["center_delta"][i, :n].float() + batch["vis_center"][i].to(device).float()
-        r_pred = rotation_6d_to_matrix(out["rot6d"][i, :n].float())
+        r_pred = rotation_6d_to_matrix(batch["vis_rot6d"][i].to(device).float())  # inherited
         pc.append(center_pred)
         ps.append(size_pred)
         pr.append(r_pred)

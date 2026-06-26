@@ -15,12 +15,14 @@ def test_sample_has_visible_actual_catalog_and_assignment():
     n = s["vis_center"].shape[0]
     assert s["act_center"].shape[0] == n and s["assign"].shape[0] == n
     assert s["act_size"].shape == (n, 3) and s["act_rot6d"].shape == (n, 6)
-    # actual size is ascending-sorted
-    assert torch.all(s["act_size"][:, 0] <= s["act_size"][:, 1] + 1e-4)
-    assert torch.all(s["act_size"][:, 1] <= s["act_size"][:, 2] + 1e-4)
-    # assignment indexes into the catalog
-    k = s["catalog"].shape[0]
+    # actual size is stored NATIVE (per-axis); its sorted dims match the
+    # assigned catalog row (the box shares the visible orientation)
+    cat = s["catalog"]
+    k = cat.shape[0]
     assert k >= 1 and int(s["assign"].max()) < k
+    for j in range(n):
+        ss = s["act_size"][j].sort().values
+        assert torch.allclose(cat[s["assign"][j]], ss, atol=1e-3)
 
 
 @pytest.mark.skipif(not os.path.isdir(ROOT), reason="sim data not present")

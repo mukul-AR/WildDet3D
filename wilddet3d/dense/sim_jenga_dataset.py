@@ -18,13 +18,26 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from wilddet3d.dense.jenga_utils import assign_index, canonicalize_obb, parse_catalog
+from wilddet3d.dense.jenga_utils import assign_index, parse_catalog
 from wilddet3d.dense.sim_dataset import (
     _IMAGENET_MEAN,
     _IMAGENET_STD,
     _SIGNS,
     _resize_pad,
 )
+
+
+def feat_cache_path(cache_dir: str, cam_dir: str) -> str:
+    """Deterministic cache filename for a camera view's precomputed feature."""
+    key = hashlib.md5(os.path.abspath(cam_dir).encode()).hexdigest()
+    return os.path.join(cache_dir, f"{key}.npy")
+
+
+def _pad_geom(h: int, w: int, size: int) -> tuple[float, int, int]:
+    """Aspect-preserving resize-pad geometry (matches ``_resize_pad``)."""
+    scale = size / max(h, w)
+    nh, nw = int(round(h * scale)), int(round(w * scale))
+    return scale, (size - nw) // 2, (size - nh) // 2
 
 
 def _in_split(scene_dir: str, split: str, val_frac: float) -> bool:
@@ -128,7 +141,12 @@ class SimJengaDataset(Dataset):
                 np.array(b["actual_extrinsic_4x4"], dtype=np.float64),
                 np.array(b["actual_geometry"], dtype=np.float32),
             )
-            a_size_sorted, a_r_canon = canonicalize_obb(ag, a_r)
+            # The actual box shares the visible box's orientation exactly
+            # (verified 0 deg dataset-wide), so we store its size per-axis
+            # (NATIVE, same frame as visible) and the native rotation. No
+            # canonicalization: Stage 2 inherits R from the visible box and only
+            # selects the SKU + places the center. Assignment matches the sorted
+            # dims to the scene catalog.
 
             # visible 2D box (native intrinsics) -> resized/padded px
             corners = (v_r @ (_SIGNS * vg).T).T + vc
@@ -144,9 +162,9 @@ class SimJengaDataset(Dataset):
                 [x1 * scale + px, y1 * scale + py, x2 * scale + px, y2 * scale + py]
             )
             act_c.append(ac.tolist())
-            act_s.append(a_size_sorted.tolist())
-            act_r.append(a_r_canon[:2].reshape(6).tolist())
-            assign.append(assign_index(a_size_sorted, catalog))
+            act_s.append(ag.tolist())  # native per-axis extents
+            act_r.append(a_r[:2].reshape(6).tolist())  # native R_act (== R_vis)
+            assign.append(assign_index(np.sort(ag), catalog))
 
         n = len(vis_c)
 

@@ -67,7 +67,12 @@ def decode_dense(
 
 @torch.no_grad()
 def decode_jenga(stage1_dets, feat, stride, stage2, catalog, k):
-    """Chain Stage-1 visible dets -> Stage-2 actual boxes (argmax dim selection).
+    """Chain Stage-1 visible dets -> Stage-2 actual boxes.
+
+    The actual box **inherits the visible box's rotation** (verified identical in
+    the data); Stage 2 only selects the SKU and places the center. The selected
+    SKU's sorted dims are laid onto the box axes by the visible per-axis extent
+    order (smallest dim -> axis with smallest visible extent).
 
     Args:
         stage1_dets: per-image dicts from :func:`decode_dense`
@@ -79,8 +84,8 @@ def decode_jenga(stage1_dets, feat, stride, stage2, catalog, k):
         k: ``[B, 3, 3]`` intrinsics (input resolution).
 
     Returns:
-        per-image dict: ``center`` ``[M,3]``, ``size`` ``[M,3]`` (a catalog row),
-        ``R`` ``[M,3,3]``, ``score`` ``[M]``, ``assign`` ``[M]``.
+        per-image dict: ``center`` ``[M,3]``, ``size`` ``[M,3]`` (per-axis catalog
+        dims), ``R`` ``[M,3,3]`` (visible rotation), ``score`` ``[M]``, ``assign`` ``[M]``.
     """
     out = []
     for i, det in enumerate(stage1_dets):
@@ -106,9 +111,11 @@ def decode_jenga(stage1_dets, feat, stride, stage2, catalog, k):
         res = stage2(feat[i : i + 1], [uv], [vis_obb], [catalog[i]])
         n = c.shape[0]
         assign = res["assign_logits"][0, :n].argmax(-1)
-        size = catalog[i][assign]
+        sku = catalog[i][assign]  # [n, 3] ascending catalog dims
+        order = det["size"].argsort(dim=-1)  # axes ascending by visible extent
+        size = torch.zeros_like(sku).scatter_(1, order, sku)  # per-axis dims
         center = c + res["center_delta"][0, :n]
-        R = rotation_6d_to_matrix(res["rot6d"][0, :n])
+        R = det["R"]  # rotation inherited from the visible box
         out.append(
             {
                 "center": center,

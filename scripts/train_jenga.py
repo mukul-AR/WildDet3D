@@ -73,12 +73,11 @@ def make_queries(batch: dict, stride: float) -> tuple[list, list]:
 
 @torch.no_grad()
 def validate(model, stage2, loader, loss2_fn, size, device, amp, n_samples=2048) -> dict:
-    """Teacher-forced val metrics: 3D IoU + center/size/assign/overlap + rot_deg."""
+    """Teacher-forced val metrics: 3D IoU + center / size / assign / overlap."""
     model.eval()
     stage2.eval()
     keys = ("iou", "center_dist", "size_err", "correct", "overlap")
     acc = {k: [] for k in keys}
-    rot_sum, rot_n = 0.0, 0.0
     for batch in loader:
         batch = move(batch, device)
         with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
@@ -88,20 +87,14 @@ def validate(model, stage2, loader, loss2_fn, size, device, amp, n_samples=2048)
         out = stage2(feat, queries_uv, vis_obb, batch["catalog"])
         out = {k: (v.float() if torch.is_tensor(v) and v.is_floating_point() else v)
                for k, v in out.items()}
-        d = loss2_fn(out, batch)
-        if d["num_q"].item() == 0:
+        if int(out["q_mask"].sum()) == 0:
             continue
-        rot_sum += d["rot_deg"].item() * d["num_q"].item()
-        rot_n += d["num_q"].item()
         arr = stage2_eval_arrays(out, batch, n_samples)
         for k in keys:
             acc[k].append(arr[k])
     arrays = {k: (torch.cat(v) if v else torch.zeros(0, device=device))
               for k, v in acc.items()}
-    s = summarize_eval(arrays)
-    if rot_n > 0:
-        s["rot_deg"] = rot_sum / rot_n
-    return s
+    return summarize_eval(arrays)
 
 
 def main() -> None:
@@ -121,7 +114,6 @@ def main() -> None:
     ap.add_argument("--heads", type=int, default=8)
     ap.add_argument("--w-assign", type=float, default=1.0)
     ap.add_argument("--w-center", type=float, default=1.0)
-    ap.add_argument("--w-rot2", type=float, default=1.0)
     ap.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--out", default="ckpt/jenga")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -158,7 +150,7 @@ def main() -> None:
     print(f"trainable params: {n_train/1e6:.2f}M (stage1+fusion + stage2 {n_s2/1e6:.2f}M)", flush=True)
 
     loss1_fn = DenseDet3DLoss()
-    loss2_fn = JengaStage2Loss(args.w_assign, args.w_center, args.w_rot2)
+    loss2_fn = JengaStage2Loss(args.w_assign, args.w_center)
     opt = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
@@ -217,9 +209,7 @@ def main() -> None:
                     "train/s1_rot_deg": l1["rot_deg"].item(),
                     "train/assign": l2["assign"].item(),
                     "train/center": l2["center"].item(),
-                    "train/rot2": l2["rot"].item(),
                     "train/assign_acc": l2["assign_acc"].item(),
-                    "train/s2_rot_deg": l2["rot_deg"].item(),
                     "lr": opt.param_groups[0]["lr"],
                     "epoch": epoch + 1,
                 }, step=gstep)
@@ -232,8 +222,8 @@ def main() -> None:
                f"acc {agg['acc']/n:.3f} | {time.time()-t0:.0f}s")
         if val:
             msg += (f" || val iou {val.get('iou3d', 0):.3f} "
-                    f"(@.5 {val.get('iou_50', 0):.2f}) acc {val.get('assign_acc', 0):.3f} "
-                    f"rot {val.get('rot_deg', 0):.1f}deg ctr {val.get('center_dist', 0):.3f} "
+                    f"(@.5 {val.get('iou_50', 0):.2f} @.75 {val.get('iou_75', 0):.2f}) "
+                    f"acc {val.get('assign_acc', 0):.3f} ctr {val.get('center_dist', 0):.3f} "
                     f"ovlp {val.get('overlap_frac', 0):.3f}")
         print(msg, flush=True)
         if wb is not None:

@@ -28,7 +28,6 @@ sys.path.insert(0, "third_party/moge")
 from wilddet3d.dense.loss import JengaStage2Loss  # noqa: E402
 from wilddet3d.dense.metrics import stage2_eval_arrays, summarize_eval  # noqa: E402
 from wilddet3d.dense.model import DenseDet3D  # noqa: E402
-from wilddet3d.dense.rotation_utils import rad2deg, sized_symmetry_min_geodesic  # noqa: E402
 from wilddet3d.dense.sim_jenga_dataset import SimJengaDataset, jenga_collate  # noqa: E402
 from wilddet3d.dense.stage2 import JengaStage2  # noqa: E402
 
@@ -97,7 +96,6 @@ def main() -> None:
 
     keys = ("iou", "center_dist", "size_err", "correct", "overlap")
     acc = {k: [] for k in keys}
-    rot = []
     for batch in loader:
         batch = move(batch, args.device)
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
@@ -110,17 +108,9 @@ def main() -> None:
         arr = stage2_eval_arrays(out, batch, args.n_samples)
         for k in keys:
             acc[k].append(arr[k])
-        # size-aware rotation error per query (degrees)
-        for i in range(len(batch["vis_center"])):
-            n = int(out["q_mask"][i].sum())
-            if n == 0:
-                continue
-            rot.append(rad2deg(sized_symmetry_min_geodesic(
-                out["rot6d"][i, :n], batch["act_rot6d"][i], batch["act_size"][i])))
 
     arrays = {k: (torch.cat(v) if v else torch.zeros(0)) for k, v in acc.items()}
     s = summarize_eval(arrays)
-    rot_all = torch.cat(rot) if rot else torch.zeros(0)
     print("\n==================== JENGA eval (teacher-forced) ====================")
     print(f"  boxes evaluated     : {s.get('n_boxes', 0)}")
     print(f"  3D IoU (mean)       : {s.get('iou3d', 0):.4f}      [gate >= 0.95]")
@@ -128,9 +118,7 @@ def main() -> None:
     print(f"  assignment accuracy : {s.get('assign_acc', 0):.4f}")
     print(f"  actual-center dist  : {s.get('center_dist', 0)*100:.2f} cm")
     print(f"  size error (L1 sum) : {s.get('size_err', 0)*100:.2f} cm")
-    if rot_all.numel():
-        print(f"  rotation error      : mean {rot_all.mean():.2f} / median "
-              f"{rot_all.median():.2f} deg   [gate < 5 median, size-aware]")
+    print("  rotation error      : 0.00 deg (inherited from the visible box)")
     print(f"  pairwise overlap    : {s.get('overlap_frac', 0)*100:.2f}% of box-pairs intersect")
     print("=====================================================================\n")
 

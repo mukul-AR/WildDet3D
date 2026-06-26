@@ -77,9 +77,11 @@ class JengaStage2(nn.Module):
         )
         self.q_to_assign = nn.Linear(d_model, d_model)
         self.k_to_assign = nn.Linear(d_model, d_model)
-        self.pose_head = nn.Sequential(
-            nn.Linear(d_model, d_model), nn.GELU(), nn.Linear(d_model, 9)
-        )  # 3 center delta + 6 rot
+        # Rotation is inherited from the visible box (not predicted); the head
+        # only places the actual center.
+        self.center_head = nn.Sequential(
+            nn.Linear(d_model, d_model), nn.GELU(), nn.Linear(d_model, 3)
+        )
 
     @staticmethod
     def _sample_feat(feat: Tensor, uv: Tensor) -> Tensor:
@@ -120,11 +122,9 @@ class JengaStage2(nn.Module):
         ka = self.k_to_assign(kv)  # [B,Kmax,d]
         logits = torch.einsum("bqd,bkd->bqk", qa, ka) / (self.d_model ** 0.5)
         logits = logits.masked_fill(~k_mask[:, None, :], float("-inf"))
-        pose = self.pose_head(q)
         return {
             "assign_logits": logits,
-            "center_delta": pose[..., :3],
-            "rot6d": pose[..., 3:],
+            "center_delta": self.center_head(q),
             "q_mask": q_mask,
             "k_mask": k_mask,
         }
