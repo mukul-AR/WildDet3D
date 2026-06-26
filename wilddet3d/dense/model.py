@@ -75,11 +75,8 @@ class DenseDet3D(nn.Module):
         images_01 = images * self._imagenet_std + self._imagenet_mean
         return (images_01 - 0.5) / 0.5
 
-    def forward(
-        self, images: Tensor, depth: Tensor, k: Tensor
-    ) -> dict[str, Tensor]:
-        """Args: images ``[B,3,H,W]`` (ImageNet-norm), depth ``[B,1,H,W]`` (m),
-        k ``[B,3,3]``. Returns dense ``heatmap`` + ``reg`` maps."""
+    def _fused_feats(self, images: Tensor, depth: Tensor, k: Tensor) -> list[Tensor]:
+        """Frozen encoders + depth fusion -> list of fused FPN levels."""
         _, _, h, w = images.shape
         with torch.no_grad():
             backbone_out = self.backbone.forward_image(self._to_sam3(images))
@@ -105,8 +102,20 @@ class DenseDet3D(nn.Module):
         )
         if not isinstance(fused, (list, tuple)):
             fused = [fused]
-        feat = fused[self.fpn_level]
-        return self.head(feat)
+        return list(fused)
+
+    def forward(
+        self, images: Tensor, depth: Tensor, k: Tensor, return_feat: bool = False
+    ) -> dict[str, Tensor]:
+        """Args: images ``[B,3,H,W]`` (ImageNet-norm), depth ``[B,1,H,W]`` (m),
+        k ``[B,3,3]``. Returns dense ``heatmap`` + ``reg`` maps; when
+        ``return_feat`` also the fused ``feat`` ``[B,C,Hf,Wf]`` + ``stride``."""
+        feat = self._fused_feats(images, depth, k)[self.fpn_level]
+        out = self.head(feat)
+        if return_feat:
+            out["feat"] = feat
+            out["stride"] = images.shape[-1] / feat.shape[-2]
+        return out
 
     @classmethod
     def from_wilddet3d(
