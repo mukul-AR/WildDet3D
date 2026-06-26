@@ -63,3 +63,59 @@ def decode_dense(
             {"center": center, "size": size, "R": rot, "score": topv}
         )
     return out
+
+
+@torch.no_grad()
+def decode_jenga(stage1_dets, feat, stride, stage2, catalog, k):
+    """Chain Stage-1 visible dets -> Stage-2 actual boxes (argmax dim selection).
+
+    Args:
+        stage1_dets: per-image dicts from :func:`decode_dense`
+            (``center``/``size``/``R``/``score`` of the *visible* boxes).
+        feat: fused FPN map ``[B, C, Hf, Wf]`` (from ``DenseDet3D(..., return_feat=True)``).
+        stride: input-pixel / FPN-cell ratio.
+        stage2: a :class:`~wilddet3d.dense.stage2.JengaStage2` module.
+        catalog: per-image candidate dims ``[Ki, 3]`` (ascending-sorted).
+        k: ``[B, 3, 3]`` intrinsics (input resolution).
+
+    Returns:
+        per-image dict: ``center`` ``[M,3]``, ``size`` ``[M,3]`` (a catalog row),
+        ``R`` ``[M,3,3]``, ``score`` ``[M]``, ``assign`` ``[M]``.
+    """
+    out = []
+    for i, det in enumerate(stage1_dets):
+        c = det["center"]
+        if c.shape[0] == 0:
+            out.append(
+                {
+                    "center": c,
+                    "size": c.new_zeros(0, 3),
+                    "R": c.new_zeros(0, 3, 3),
+                    "score": det["score"],
+                    "assign": c.new_zeros(0, dtype=torch.long),
+                }
+            )
+            continue
+        fx, fy = k[i, 0, 0], k[i, 1, 1]
+        cx0, cy0 = k[i, 0, 2], k[i, 1, 2]
+        z = c[:, 2].clamp_min(1e-3)
+        u = (fx * c[:, 0] / z + cx0) / stride
+        v = (fy * c[:, 1] / z + cy0) / stride
+        uv = torch.stack([u, v], dim=-1)
+        vis_obb = torch.cat([c, det["size"], det["R"][:, :2].reshape(-1, 6)], dim=-1)
+        res = stage2(feat[i : i + 1], [uv], [vis_obb], [catalog[i]])
+        n = c.shape[0]
+        assign = res["assign_logits"][0, :n].argmax(-1)
+        size = catalog[i][assign]
+        center = c + res["center_delta"][0, :n]
+        R = rotation_6d_to_matrix(res["rot6d"][0, :n])
+        out.append(
+            {
+                "center": center,
+                "size": size,
+                "R": R,
+                "score": det["score"],
+                "assign": assign,
+            }
+        )
+    return out
