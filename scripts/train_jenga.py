@@ -32,6 +32,7 @@ sys.path.insert(0, "third_party/moge")
 
 from wilddet3d.dense.sim_jenga_dataset import SimJengaDataset, jenga_collate  # noqa: E402
 from wilddet3d.dense.loss import DenseDet3DLoss, JengaStage2Loss  # noqa: E402
+from wilddet3d.dense.metrics import stage2_eval_arrays, summarize_eval  # noqa: E402
 from wilddet3d.dense.model import DenseDet3D  # noqa: E402
 from wilddet3d.dense.stage2 import JengaStage2  # noqa: E402
 from wilddet3d.dense.targets import build_dense_targets  # noqa: E402
@@ -71,10 +72,13 @@ def make_queries(batch: dict, stride: float) -> tuple[list, list]:
 
 
 @torch.no_grad()
-def validate(model, stage2, loader, loss2_fn, size, device, amp) -> dict:
+def validate(model, stage2, loader, loss2_fn, size, device, amp, n_samples=2048) -> dict:
+    """Teacher-forced val metrics: 3D IoU + center/size/assign/overlap + rot_deg."""
     model.eval()
     stage2.eval()
-    agg = {"assign_acc": 0.0, "rot_deg": 0.0, "center": 0.0, "n": 0}
+    keys = ("iou", "center_dist", "size_err", "correct", "overlap")
+    acc = {k: [] for k in keys}
+    rot_sum, rot_n = 0.0, 0.0
     for batch in loader:
         batch = move(batch, device)
         with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
@@ -87,12 +91,17 @@ def validate(model, stage2, loader, loss2_fn, size, device, amp) -> dict:
         d = loss2_fn(out, batch)
         if d["num_q"].item() == 0:
             continue
-        agg["assign_acc"] += d["assign_acc"].item()
-        agg["rot_deg"] += d["rot_deg"].item()
-        agg["center"] += d["center"].item()
-        agg["n"] += 1
-    n = max(agg["n"], 1)
-    return {k: agg[k] / n for k in ("assign_acc", "rot_deg", "center")}
+        rot_sum += d["rot_deg"].item() * d["num_q"].item()
+        rot_n += d["num_q"].item()
+        arr = stage2_eval_arrays(out, batch, n_samples)
+        for k in keys:
+            acc[k].append(arr[k])
+    arrays = {k: (torch.cat(v) if v else torch.zeros(0, device=device))
+              for k, v in acc.items()}
+    s = summarize_eval(arrays)
+    if rot_n > 0:
+        s["rot_deg"] = rot_sum / rot_n
+    return s
 
 
 def main() -> None:
@@ -222,8 +231,10 @@ def main() -> None:
                f"(s1 {agg['s1']/n:.4f}) | assign {agg['assign']/n:.4f} "
                f"acc {agg['acc']/n:.3f} | {time.time()-t0:.0f}s")
         if val:
-            msg += (f" || val acc {val['assign_acc']:.3f} "
-                    f"rot {val['rot_deg']:.1f}deg center {val['center']:.3f}")
+            msg += (f" || val iou {val.get('iou3d', 0):.3f} "
+                    f"(@.5 {val.get('iou_50', 0):.2f}) acc {val.get('assign_acc', 0):.3f} "
+                    f"rot {val.get('rot_deg', 0):.1f}deg ctr {val.get('center_dist', 0):.3f} "
+                    f"ovlp {val.get('overlap_frac', 0):.3f}")
         print(msg, flush=True)
         if wb is not None:
             log = {"epoch/total": agg["total"] / n, "epoch/assign_acc": agg["acc"] / n,
