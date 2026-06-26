@@ -1,243 +1,212 @@
-# JENGA — Handoff (Anyware 9-DoF Warehouse Box Detection)
+# JENGA — Handoff (Anyware two-stage 9-DoF warehouse box detector)
 
-> **Prompt-free, single-view 9-DoF 3D box detector** for warehouse unloading,
-> built on WildDet3D's frozen SAM3 + LingBot-Depth encoders with a dense conv
-> head. **Trains on Isaac/anyware-sim data only.** Branch: `visible_actual_estimation`
-> (pushed to `github.com/mukul-AR/WildDet3D`).
-
-The repo is **stripped to one path**: sim data → dense JENGA detector. All
-prompt-based / two-stage / multiview / real-COCO code was removed.
+> **Prompt-free, single-view 9-DoF 3D box detector** for warehouse unloading.
+> Frozen SAM3 + LingBot-Depth encoders → **Stage 1** (visible-box detection) →
+> **Stage 2** (dimension-conditioned: inherits orientation, picks the scene SKU,
+> places the full *actual* box). Trains on Isaac/anyware-sim data.
+> Branch: `visible_actual_estimation` (pushed to `github.com/mukul-AR/WildDet3D`).
 
 ---
 
 ## 0. TL;DR
 
-- **Model:** `wilddet3d/dense/` — dense CenterNet-3D head over the depth-fused
-  SAM3 FPN. No text, no prompts, no per-object input.
-- **Data:** sim only (`SimDenseDataset`) — each camera's `metadata.json` has, per
-  box, `visible_`/`actual_` `extrinsic_4x4` + `geometry` (+`visible_fraction`);
-  boxes are world-frame, `center_cam = inv(camera_extrinsic_4x4) @ pose`.
-- **Encoders:** frozen, loaded from the downloaded stage-2 WildDet3D checkpoint;
-  only the dense head (+fusion) trains (~4.8M params).
-- **Verified:** 5-epoch local sim run trains cleanly (loss ↓, rot-err ↓, ckpt saved).
+- **Two-stage model** (`wilddet3d/dense/`): frozen encoders → Stage-1 dense head
+  (visible 9-DoF box) → Stage-2 transformer (dim-conditioned actual box).
+- **Stage 2 inherits rotation** from the visible box — verified visible==actual
+  rotation = **0°** dataset-wide. It only **selects the scene's SKU** + predicts
+  **per-axis extents** (the dim→axis assignment) + a **center** residual.
+- **Data:** fixed 2-SKU sim dump (corner-fix), **3,978 scenes**. Old data deprecated.
+- **Current best:** see the runs table (§6). `testing-5` (learned per-axis + ADD
+  loss) is the live attempt to fix the per-axis placement bottleneck.
+- **Gate:** 3D IoU ≥ 0.95, rotation < 5° median (Perception-V3 doc).
 
 ```bash
-PYTHONPATH=. .venv/bin/python scripts/train_dense_9dof.py \
-  --sim-root <anyware-sim>/build/scenes/synth --sim-target actual \
-  --epochs 6 --batch-size 2 \
-  --wilddet3d-ckpt ckpt/wilddet3d_stage2_alldata_12e_v1.0.pt --out ckpt/jenga
+# train (fixed data, frozen encoders, W&B opt-in)
+PYTHONPATH=. .venv/bin/python scripts/train_jenga.py \
+  --sim-root ~/data_fixed --epochs 12 --batch-size 16 --workers 14 --val-frac 0.1 \
+  --d-model 512 --layers 12 --heads 8 \
+  --wandb --wandb-entity anyware-robotics --wandb-run-name testing-N \
+  --wilddet3d-ckpt ckpt/wilddet3d_stage2_alldata_12e_v1.0.pt --out ckpt/jengaN
 ```
 
 ---
 
-## 1. Environment (`scripts/setup_venv.sh`)
+## 1. Architecture (`wilddet3d/dense/`)
 
-uv venv at `.venv` (Python 3.11). One-time: `bash scripts/setup_venv.sh`.
-- **torch 2.8.0 + cu128** (README's 2.5.1/cu121 does NOT support Blackwell
-  sm_120; cu128 also works on A100/H100).
-- vis4d 1.0.0 (+ `numpy<2`), utils3d, shapely, **MoGe** (`third_party/moge`).
-- **`vis4d_cuda_ops` stub** (`scripts/vis4d_cuda_ops_stub.py`): the real ext is
-  eval-only and needs CUDA-12.8 nvcc for sm_120; training doesn't use it. On
-  Ampere/Hopper you can build the real one (enables 3D-IoU eval).
-- Weights (public HF): stage-2 ckpt (`allenai/WildDet3D`, 4.7 GB) + LingBot
-  depth backbone (`robbyant/...`, 1.3 GB).
-- `facebook/sam3` is **gated**: SAM3 is built structure-only; its weights come
-  from the stage-2 ckpt. Input is **locked to 1008²** (SAM3 RoPE).
+```
+RGB-D (1008²) + per-scene SKU catalog + K
+        │
+   ❄ SAM3 ViT-L/14 (RGB) ─┐
+   ❄ LingBot-Depth DINOv2 ─┼─ ❄/🔥 EarlyDepthFusion ─► fused FPN feat [B,256,144,144]
+                            │   (fusion trainable, 0.07M)
+        ┌───────────────────┴───────────────────┐
+   🔥 STAGE 1 (dense head, ~5.4M)          (same feat)
+   per-cell heatmap + 12-ch 9-DoF              │
+   VISIBLE OBB                                 │
+        │ visible boxes (R, size, center)      │
+        ▼  → queries (teacher-forced GT in train)
+   🔥 STAGE 2 (transformer, d=512/12L/8H, ~52M)
+   queries (feat sample + OBB embed) self-attn + cross-attn over SKU dim tokens
+   → assignment over scene SKUs  +  per-axis log-extents  +  center Δ
+   → actual box = R_visible (inherited) + SKU dims @ predicted axis-order + center
+```
+
+- **Frozen** (no_grad): SAM3 backbone + LingBot-Depth backbone (~1.1B total).
+  Optionally fine-tunable at low LR — see §4.
+- **Trainable** (~57M): EarlyDepthFusion + Stage-1 head + Stage-2 transformer.
+- **Input locked 1008²** (SAM3 RoPE).
+- Files: `model.py` (DenseDet3D + frozen encoders + `from_wilddet3d`), `head.py`
+  (Stage-1 dense head), `stage2.py` (Stage-2 transformer), `targets.py`,
+  `loss.py`, `decode.py`, `metrics.py`, `sim_jenga_dataset.py`,
+  `rotation_utils.py`, `jenga_utils.py`.
+
+### Relationship to WildDet3D
+We **keep WildDet3D's frozen encoders + fusion** and **replaced its head**:
+original WildDet3D is **7-DoF (yaw-only) + prompt-conditioned**; ours is **9-DoF
+(full rotation), prompt-free, two-stage**. The 6D rotation rep (Zhou 2019) is used
+in Stage 1; Stage 2 inherits it.
 
 ---
 
-## 2. Data — sim (the only format)
+## 2. The key design decisions (and why)
+
+1. **Stage 2 inherits rotation, doesn't predict it.** Measured: visible & actual
+   boxes share orientation **exactly 0°** (camera sees the front face). So
+   orientation is observed via the visible box; Stage 2 has no rotation
+   output/loss/symmetry/canonicalization. This removed the part that was going
+   wrong.
+2. **Per-scene SKU catalog is an *input*, never baked into weights.** Real
+   catalogs are open-ended. Each scene has **1–2 SKUs** (12% single = no choice,
+   88% binary; only ~5% are "face-ambiguous" — same front face, different depth —
+   and need scene-level reasoning, handled by Stage-2 self-attention).
+3. **Stage 2 predicts per-axis extents** (the dim→axis assignment), not just
+   "which SKU". Even with orientation fixed, *which SKU dim goes on which axis* is
+   an open decision; getting it wrong is the dominant error (see §6 testing-4).
+4. **Corner-distance (ADD) loss + metric.** 3D IoU saturates on cube-ish boxes
+   (rotating/mis-assigning barely changes volume) → it can't supervise the axis
+   assignment. ADD (corner-to-corner, fixed correspondence) does. ADD-S is the
+   symmetry-tolerant variant.
+
+---
+
+## 3. Data — fixed 2-SKU sim dump
 
 ```
-<root>/anyware-sim/build/scenes/synth/synth_<hash>/
-    scene.json                         # world-frame boxes, container, skus
-    {idx}_camera_pole_{bottom,left,right}/   # 3 cams/scene
+<root>/synth_<hash>/
+    scene.json                         # world-frame boxes {extrinsic_4x4, geometry, sku}, skus_yaml_string
+    0_camera_pole_{bottom,left,right}/  # 3 cams/scene
         rgb.png, depth.png (uint16 mm), metadata.json
-metadata.json:
-    intrinsics {fx,fy,cx,cy,width,height}
-    camera_extrinsic_4x4               # camera pose in world (cam->world)
+metadata.json: intrinsics, camera_extrinsic_4x4 (cam->world),
     boxes{uuid: {visible_extrinsic_4x4, visible_geometry,
-                 actual_extrinsic_4x4,  actual_geometry, visible_fraction, sku}}
+                 actual_extrinsic_4x4, actual_geometry, visible_fraction, sku}}
 ```
-`SimDenseDataset(sim_root, size=1008, target="actual"|"visible", max_scenes)`
-yields one sample **per camera view** (single-view): RGB-D (1008², resize+pad,
-ImageNet-norm), pad-adjusted K, and camera-frame GT (`center`, box-axis `size`,
-6D `rot`, projected `box2d`). `target` picks the visible (Stage-1) or actual
-(full) box. Real captures lack a visible/actual split → we standardised on sim
-(which renders both).
+
+- **Source:** `s3://anyware-perception-data-dumps/dataset-unload-3Dlearning/20260625_3D-Learning-Dump_2-SKU.tar.gz`
+  (13.4 GB, the **corner-fixed** dump — earlier data had bad visible corners).
+- **Local:** `/storage/3dl_sim_data/20260625_fixed/synth_*` (3,978 scenes).
+- **H100:** `~/data_fixed/synth_*`.
+- `SimJengaDataset` yields, per camera view: RGB-D (1008², resize+pad,
+  ImageNet-norm), pad-adjusted K, **visible** OBBs, **actual** OBBs (native
+  per-axis size + native rotation == visible), **scene catalog** (sorted dims),
+  per-box **assignment** index, all camera-frame. Hash-based **train/val split**
+  (`--val-frac`).
+- ⚠️ Old buggy data (`/storage/3dl_sim_data/scenes`, ~5,281 scenes) is deprecated;
+  don't train on it.
 
 ---
 
-## 3. Model — `wilddet3d/dense/`
+## 4. Loss & training (`scripts/train_jenga.py`)
 
-- `model.py` `DenseDet3D` — reuses SAM3 backbone + LingBot depth +
-  `EarlyDepthFusion` (init from a WildDet3D ckpt via `from_wilddet3d(...)`,
-  **frozen, `no_grad`**) + dense head on a fused FPN level (default 1 = 144²,
-  256-ch). Tap point: `backbone_out["backbone_fpn"]` after fusion.
-- `head.py` — per-cell objectness heatmap + 12-ch reg `[du, dv, log_z,
-  log-size(3), 6D rot(6)]`.
-- `targets.py` — project GT centers to the FPN grid, CenterNet Gaussian
-  heatmap, per-cell 9-DoF targets.
-- `loss.py`, `rotation_utils.py`, `sim_dataset.py`, `decode.py` (see below).
-
-Depth backend + SAM3 backbone are **always frozen**; only the dense head
-(+fusion) trains.
-
----
-
-## 4. Loss (`wilddet3d/dense/loss.py`)
-
-### 4.1 Current (single-target)
-`DenseDet3DLoss` predicts **one** OBB per cell, supervised against **one** target
-(`visible` OR `actual`, set by `--sim-target`):
-```
-L = λ_hm·focal(heatmap) + λ_off·L1(du,dv) + λ_z·L1(log_z)
-    + λ_size·L1(log w,h,l) + λ_rot·symmetry_chordal_rotation
-```
-- **Heatmap / "number of boxes":** there is **no explicit count term**. The
-  count is *emergent* — focal loss puts a Gaussian peak at each GT center and
-  suppresses elsewhere; a missed box (low score at a true center) or a
-  hallucination (high score on an empty cell) is penalised per-cell. At
-  inference the box count = heatmap peaks above `--score-thresh` (a tunable knob).
-- **Rotation:** 6D continuous rep (Zhou 2019) → Gram-Schmidt → R. Loss is the
-  **chordal distance**, minimised over the **4 cuboid symmetries** (a box looks
-  identical flipped 180°), so the model isn't punished for a physically-correct
-  but differently-labelled orientation. Reported metric `rot_deg` =
-  symmetry-aware geodesic angle in degrees (the "how close is the orientation"
-  number in the logs). Captures the **full 3D** rotation (tilt/lean), not yaw-only.
-
-### 4.2 Planned (richer multi-task — uses the sim's visible+actual+SKU)
-The single-target loss underuses the data. Next upgrade keeps ONE dense
-detector but makes the head multi-task:
-```
-heatmap(1) + visible_OBB(12) + actual_OBB(12)
-L = λ_hm·focal + λ_vis·OBB(visible) + λ_act·OBB(actual) + λ_sku·snap(actual_size → nearest scene SKU)
-```
-- **visible** ← `visible_extrinsic_4x4`+`visible_geometry` (what the camera sees).
-- **actual** ← `actual_extrinsic_4x4`+`actual_geometry` (full box; the deploy output).
-- **SKU snap** ← rotation-invariant L1 pulling predicted *actual* dims to the
-  nearest catalog SKU (from `scene.json` `skus_yaml_string`); acts as a catalog
-  prior so predictions are valid known sizes. (Optionally a SKU-classification
-  head instead.) This is the visible→actual→SKU pipeline the branch is named for,
-  now with **real labels** (no faked occlusion). **Not implemented yet** — the
-  current head/loss is single-target.
+- **Stage 1** (`DenseDet3DLoss`, on the *visible* box): focal heatmap + L1 offset
+  + L1 log-depth + L1 log-size + **4-symmetry chordal rotation** (NOT size-aware —
+  see §6 testing-3).
+- **Stage 2** (`JengaStage2Loss`): `assign CE + center L1 + per-axis size L1 +
+  ADD corner`. No rotation term (inherited).
+- **Teacher forcing:** Stage 2 trains on GT visible boxes; inference chains
+  Stage-1 predictions → Stage-2 (`decode_jenga`). ⚠️ Val metrics are therefore
+  *optimistic* (assume perfect visible detection). **Stage-1 quality is never
+  measured end-to-end yet** — a known gap.
+- **Joint loss**, encoders frozen by default; single GPU.
+- **Optional encoder fine-tune:** `--encoder-lr 1e-5` unfreezes **SAM3 (RGB)**;
+  `--depth-encoder-lr` unfreezes the depth backbone (default 0 = frozen). Uses
+  discriminative LR groups. Heavy (batch must drop to ~2–4). Not yet run.
+- CLI knobs: `--d-model/--layers/--heads`, `--w-assign/--w-center/--w-size/--w-add`,
+  `--val-frac`, `--encoder-lr/--depth-encoder-lr`.
 
 ---
 
-## 5. Train / Visualize / Inference
+## 5. Metrics & eval
+
+- `wilddet3d/dense/metrics.py`: **Monte-Carlo 3D IoU** (full rotation, pure-torch;
+  pytorch3d/CUDA ops unavailable on this stack), IoU@0.5/0.75, center dist, size
+  err, **ADD / ADD-S** (corner distance), pairwise overlap (non-intersection),
+  assign acc. Logged per-epoch in the val loop + W&B.
+- `scripts/eval_jenga.py --ckpt <jenga_last.pt> --n-samples 8192` — scores a
+  checkpoint with the full suite (teacher-forced).
+- `scripts/jenga_export_pred.py` — runs the **full chain** (Stage-1 → Stage-2)
+  per scene, writes world-frame predicted boxes as `<pred-dir>/<scene>.json` for
+  the viz tool.
+- 18 unit tests in `tests/dense/` (`PYTHONPATH=. .venv/bin/python -m pytest tests/dense/`).
+
+---
+
+## 6. Runs (W&B project `jenga-9dof`, entity **`anyware-robotics`**)
+
+| run | design | data | 3D IoU | notes |
+|---|---|---|---|---|
+| testing-1 | old single dense head | old | — | killed |
+| **testing-2** | old (predicts rotation, canonical frame) | old | **0.809** | hid the per-axis issue via canonicalization |
+| testing-3 | + size-aware symmetry loss | old | 0.742 | **worse → reverted** (see memory) |
+| **testing-4** | corrected (inherit rotation, **heuristic** placement) | fixed | **0.730** | **size err 11.3 cm** — exposed the per-axis bug |
+| **testing-5** | corrected + **learned per-axis + ADD loss** | fixed | *(running)* | the fix; watch `size_err`↓ & IoU↑ |
+
+**Diagnosis from testing-4:** assign acc 0.945, center 2.8 cm, rotation 0°, but
+**size err 11.3 cm** and ADD 5.5 cm → the dominant error is the **dim→axis
+placement** (right SKU, wrong axes). `testing-5` makes that placement learned +
+ADD-supervised.
+
+⚠️ **W&B entity is `anyware-robotics`** (the script default `mukul-ganwal` fails).
+
+---
+
+## 7. Lambda H100 deployment
 
 ```bash
-# Train (sim) — W&B opt-in via --wandb
-PYTHONPATH=. .venv/bin/python scripts/train_dense_9dof.py \
-  --sim-root <synth_dir> --sim-target actual --epochs 6 --batch-size 2 \
-  --wilddet3d-ckpt ckpt/wilddet3d_stage2_alldata_12e_v1.0.pt --out ckpt/jenga [--wandb]
-
-# Visualize predicted (green) vs GT (red) 9-DoF boxes -> viz_out/*.png
-PYTHONPATH=. .venv/bin/python scripts/visualize_dense_inference.py \
-  --sim-root <synth_dir> --sim-target actual \
-  --dense-ckpt ckpt/jenga/dense_9dof_last.pt --num-images 8 --score-thresh 0.3
-
-# decode_dense (wilddet3d/dense/decode.py): heatmap peaks -> 9-DoF boxes
+ssh ubuntu@209.20.157.13          # key-based, 1× H100 80GB
 ```
-~5 min/epoch on a 24 GB GPU at batch 2 (encoders frozen, ~9 GB used); faster on
-H100/A100. Single-GPU (no DDP yet). Inference ≈ 295 ms/img bf16 on a laptop
-5090 (dominated by the frozen encoders, not the head).
+- Code synced via **rsync from the dev box** (the box has no GitHub auth):
+  `rsync -az --exclude='/.venv/' --exclude='/ckpt/' ... ./ ubuntu@209.20.157.13:~/WildDet3D/`
+- venv: `bash scripts/setup_venv.sh` (torch 2.8 cu128, vis4d, MoGe, weights,
+  `vis4d_cuda_ops` stub). `wandb` + `pytest` installed separately. `uv` installed.
+- Data: `~/data_fixed/` (extracted fixed dump). W&B key in `~/.wandb_env`.
+- Long jobs run in remote `tmux` (`tmux new -s testing-N`). Checkpoints in
+  `~/WildDet3D/ckpt/jengaN/jenga_last.pt`.
+- ⚠️ Ephemeral disk — re-sync repo/data + re-run setup on a fresh boot.
 
 ---
 
-## 6. Weights & Biases
+## 8. Viz tool (GT vs predicted)
 
-Opt-in, **no secrets committed**. `export WANDB_API_KEY=...` then `--wandb`.
-Defaults: project **`jenga-9dof`**, entity **`mukul-ganwal`** (override via
-`WD3D_WANDB_PROJECT` / `WD3D_WANDB_ENTITY` / `WD3D_RUN_NAME`). Logs per-step +
-per-epoch loss components, `rot_deg`, `num_pos`, LR.
-
----
-
-## 7. GPU / scaling
-
-- Frozen-head training: single GPU is plenty (~9 GB). **1× H100 80 GB** is the
-  current sweet spot.
-- **8× A100/H100** only for sim-pretrain on lots of data, parallel sweeps, or a
-  full fine-tune with DDP (then add DDP to the trainer).
+- Web viewer at **`/storage/3dl_sim_data/viz_tool`** (Three.js + python server),
+  modified to overlay **predicted boxes (red)** vs **GT (green)** via `--pred-dir`.
+- Generate preds: `scripts/jenga_export_pred.py --ckpt ... --scenes-dir ... --pred-dir ...`
+- Run (in **your** terminal — a sandboxed server gets killed):
+  `/home/mukul/WildDet3D/.venv/bin/python /storage/3dl_sim_data/viz_tool/server.py --root <dir> --pred-dir <preds>` → http://localhost:8000
+- ⚠️ Current preds are from **testing-2 on OLD data** — re-export from a
+  fixed-data model (e.g. testing-5) before trusting the overlay.
 
 ---
 
-## 8. Lambda H100 deployment
+## 9. Next steps
 
-### SSH / access
-```bash
-ssh ubuntu@209.20.157.13          # user: ubuntu, key-based (no password)
-```
-- Instance: **1× NVIDIA H100 PCIe 80 GB**, 26 vCPU, ~968 GB free disk.
-- Image: **Ubuntu 22.04 LTS + Lambda Stack** (default).
-- Local gateway: `tmux 3dl` (on the dev box, for connecting/attaching).
-- Remote long-running jobs should run inside a **remote tmux** (e.g.
-  `tmux new -s testing-1`) so they survive disconnects.
+1. **Watch `testing-5`** — does `size_err` collapse from 11 cm → ~1 cm and IoU
+   climb past 0.73 (toward/above 0.81)? If yes, the learned per-axis fix worked.
+2. **Re-export viz** from the best fixed-data model → inspect GT vs predicted.
+3. **SAM3 fine-tune** (`testing-6`, `--encoder-lr 1e-5`, batch ~4) — lets Stage 1
+   reshape features (the head does all adaptation when encoders are frozen).
+4. **Measure Stage 1 end-to-end** (visible-box recall / errors) — it's never been
+   measured directly; if it's the bottleneck, consider a stronger/multi-scale head.
+5. **Real `vis4d_cuda_ops`** on the H100 (Hopper) for exact 3D-IoU (currently MC).
+6. Scale sim data; DDP for multi-GPU.
 
-### Status — what's been done on the box
-| Item | Status | Detail |
-|---|---|---|
-| SSH access | ✅ done | key-based, verified |
-| Sim dataset (19 GB) | ✅ transferred | `~/20260625_2skuwallremoval.tar.gz` (rsync from local `/storage/3dl_sim_data/`) |
-| Repo | ⚠️ stale | `~/WildDet3D` at commit `9474d17` — **pre-cleanup** (still has `twostage` etc.); needs updating to `2dc6ad3` |
-| Sim data extracted | ❌ pending | tarball not yet unpacked |
-| venv | ❌ pending | `setup_venv.sh` not run |
-| `testing-1` training | ❌ pending | not started |
-
-### Finish the deployment (run `testing-1`)
-```bash
-ssh ubuntu@209.20.157.13
-cd ~/WildDet3D
-# 1. update to the cleaned code (re-rsync from dev box, or if the box has
-#    GitHub access:)  git fetch origin && git reset --hard origin/visible_actual_estimation
-# 2. extract the sim data
-tar xzf ~/20260625_2skuwallremoval.tar.gz -C ~          # -> ~/anyware-sim/build/scenes/synth
-# 3. environment (torch cu128, vis4d, MoGe, weights, stub)
-bash scripts/setup_venv.sh
-# 4. (optional) build the REAL vis4d_cuda_ops here (Hopper) to enable 3D-IoU eval
-# 5. train, logging to W&B as run "testing-1"
-export WANDB_API_KEY=...
-tmux new -s testing-1
-PYTHONPATH=. .venv/bin/python scripts/train_dense_9dof.py \
-  --sim-root ~/anyware-sim/build/scenes/synth --sim-target actual \
-  --epochs 6 --batch-size 4 --wandb --wandb-run-name testing-1 \
-  --wilddet3d-ckpt ckpt/wilddet3d_stage2_alldata_12e_v1.0.pt --out ckpt/jenga
-```
-⚠️ Lambda instances are **ephemeral** — disk wipes on termination. Use a
-persistent filesystem (region-locked) for repo/venv/data, or re-sync each boot
-(`setup_venv.sh` re-pulls the model weights itself).
-
----
-
-## 9. File map
-
-```
-wilddet3d/dense/   head | targets | loss | model | decode | sim_dataset | rotation_utils
-scripts/
-  setup_venv.sh                  env (torch cu128, vis4d, MoGe, weights, stub)
-  vis4d_cuda_ops_stub.py         eval-only CUDA-ops stub for sm_120
-  train_dense_9dof.py            train JENGA on sim (+ W&B)
-  visualize_dense_inference.py   draw predicted/GT 9-DoF boxes on RGB
-ckpt/wilddet3d_stage2_alldata_12e_v1.0.pt   downloaded base (frozen encoders)
-```
-Kept WildDet3D core (`wilddet3d/{model,inference,depth,head,ops,loss}.py`,
-`configs/base/`) — the dense model reuses it for the frozen encoders. Upstream
-scaffolding (`demo/`, `configs/eval/`, other-dataset `data_prep/`,
-`scripts/benchmark_inference.py`) is left untouched; strip further if desired.
-Removed in `2dc6ad3`: prompt-based `stage*` configs, `wilddet3d/twostage`,
-`wilddet3d/multiview`, real-COCO loaders/data-prep, `scripts/lambda/`, sweep.
-
----
-
-## 10. Next steps
-
-1. **Run `testing-1`** on the H100 (sim, W&B).
-2. **Richer multi-task loss** (§4.2): visible + actual + SKU-snap head/loss.
-3. Train on the full sim set; more epochs.
-4. Raw-folder inference mode (RGBD in, no GT) for new captures.
-5. Build real CUDA ops on the H100 → 3D-IoU eval (doc gate IoU≥0.95).
-6. (Optional) DDP for multi-GPU; rename `dense`→`jenga`.
-
-(Checkpoints, `.venv/`, `pretrained/`, `data/`, `vis4d-workspace/`, `wandb/`,
-`viz_out/` are git-ignored.)
+(Checkpoints, `.venv/`, `pretrained/`, `data/`, `wandb/`, `viz_out/` are git-ignored.)
