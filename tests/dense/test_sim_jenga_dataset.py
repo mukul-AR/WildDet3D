@@ -5,7 +5,7 @@ import torch
 
 from wilddet3d.dense.sim_jenga_dataset import SimJengaDataset, jenga_collate
 
-ROOT = "/storage/3dl_sim_data/20260625_2skuwallremoval/anyware-sim/build/scenes/synth"
+ROOT = "/storage/3dl_sim_data/20260625_fixed"
 
 
 @pytest.mark.skipif(not os.path.isdir(ROOT), reason="sim data not present")

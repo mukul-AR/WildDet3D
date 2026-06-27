@@ -36,6 +36,8 @@ from wilddet3d.dense.metrics import stage2_eval_arrays, summarize_eval  # noqa: 
 from wilddet3d.dense.model import DenseDet3D  # noqa: E402
 from wilddet3d.dense.stage2 import JengaStage2  # noqa: E402
 from wilddet3d.dense.targets import build_dense_targets  # noqa: E402
+from wilddet3d.dense.decode import decode_dense  # noqa: E402
+from wilddet3d.dense.matching import match_predicted_to_gt  # noqa: E402
 
 
 def move(batch: dict, device: str) -> dict:
@@ -71,9 +73,54 @@ def make_queries(batch: dict, stride: float) -> tuple[list, list]:
     return queries_uv, vis_obb
 
 
+def make_predicted_queries(dense, batch, stride, score_thresh, match_thresh):
+    """Stage-2 queries from Stage-1 PREDICTED visible boxes, matched to GT.
+
+    Returns ``queries_uv``, ``vis_obb`` (predicted boxes), and a per-image target
+    dict (1:1 with queries) whose ``vis_*`` are the predicted box (rotation
+    inherited) and ``act_*``/``assign`` are the matched GT box's. Unmatched
+    predictions are dropped.
+    """
+    dets = decode_dense(dense["heatmap"], dense["reg"], batch["K"], stride,
+                        score_thresh=score_thresh)
+    queries_uv, vis_obb = [], []
+    keys = ("vis_center", "vis_rot6d", "act_center", "act_size", "act_rot6d", "assign")
+    mb = {k: [] for k in keys}
+    for i, det in enumerate(dets):
+        pc, ps, pr = det["center"], det["size"], det["R"]
+        keep, gi = match_predicted_to_gt(pc, batch["vis_center"][i], match_thresh)
+        if int(keep.sum()) == 0:
+            queries_uv.append(pc.new_zeros(0, 2))
+            vis_obb.append(pc.new_zeros(0, 12))
+            mb["vis_center"].append(pc.new_zeros(0, 3))
+            mb["vis_rot6d"].append(pc.new_zeros(0, 6))
+            mb["act_center"].append(pc.new_zeros(0, 3))
+            mb["act_size"].append(pc.new_zeros(0, 3))
+            mb["act_rot6d"].append(pc.new_zeros(0, 6))
+            mb["assign"].append(pc.new_zeros(0, dtype=torch.long))
+            continue
+        gi = gi[keep]
+        pc, ps, pr6 = pc[keep], ps[keep], pr[keep][:, :2].reshape(-1, 6)
+        queries_uv.append(project_to_grid(pc, batch["K"][i], stride))
+        vis_obb.append(torch.cat([pc, ps, pr6], dim=-1))
+        mb["vis_center"].append(pc)
+        mb["vis_rot6d"].append(pr6)
+        mb["act_center"].append(batch["act_center"][i][gi])
+        mb["act_size"].append(batch["act_size"][i][gi])
+        mb["act_rot6d"].append(batch["act_rot6d"][i][gi])
+        mb["assign"].append(batch["assign"][i][gi])
+    return queries_uv, vis_obb, mb
+
+
 @torch.no_grad()
-def validate(model, stage2, loader, loss2_fn, size, device, amp, n_samples=2048) -> dict:
-    """Teacher-forced val metrics: 3D IoU + center / size / assign / overlap."""
+def validate(model, stage2, loader, size, device, amp, mode="gt",
+             score_thresh=0.3, match_thresh=0.15, n_samples=2048) -> dict:
+    """Val metrics: 3D IoU + center / size / assign / overlap / ADD.
+
+    ``mode="gt"`` = teacher-forced (Stage 2 fed GT visible boxes; comparable
+    across runs). ``mode="predicted"`` = end-to-end (Stage 1 detections matched
+    to GT; metrics over matched boxes — the deployment-relevant number).
+    """
     model.eval()
     stage2.eval()
     keys = ("iou", "center_dist", "size_err", "corner_add", "corner_adds", "correct", "overlap")
@@ -83,13 +130,19 @@ def validate(model, stage2, loader, loss2_fn, size, device, amp, n_samples=2048)
         with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
             pred = model(batch["image"], batch["depth"], batch["K"], return_feat=True)
         feat, stride = pred["feat"].float(), pred["stride"]
-        queries_uv, vis_obb = make_queries(batch, stride)
+        if mode == "predicted":
+            dense = {"heatmap": pred["heatmap"].float(), "reg": pred["reg"].float()}
+            queries_uv, vis_obb, target = make_predicted_queries(
+                dense, batch, stride, score_thresh, match_thresh)
+        else:
+            queries_uv, vis_obb = make_queries(batch, stride)
+            target = batch
         out = stage2(feat, queries_uv, vis_obb, batch["catalog"])
         out = {k: (v.float() if torch.is_tensor(v) and v.is_floating_point() else v)
                for k, v in out.items()}
         if int(out["q_mask"].sum()) == 0:
             continue
-        arr = stage2_eval_arrays(out, batch, n_samples)
+        arr = stage2_eval_arrays(out, target, n_samples)
         for k in keys:
             acc[k].append(arr[k])
     arrays = {k: (torch.cat(v) if v else torch.zeros(0, device=device))
@@ -120,6 +173,14 @@ def main() -> None:
     ap.add_argument("--w-center", type=float, default=1.0)
     ap.add_argument("--w-size", type=float, default=1.0, help="Stage-2 per-axis log-size L1")
     ap.add_argument("--w-add", type=float, default=1.0, help="Stage-2 corner-distance (ADD)")
+    ap.add_argument("--stage2-input", default="gt", choices=["gt", "predicted"],
+                    help="gt = teacher-forced (GT visible boxes); predicted = end-to-end "
+                         "(Stage-1 detections matched to GT) — the real deployment setting")
+    ap.add_argument("--train-score-thresh", type=float, default=0.3,
+                    help="Stage-1 heatmap score threshold for predicted-mode queries")
+    ap.add_argument("--match-thresh", type=float, default=0.15,
+                    help="max center distance (m) to match a predicted box to a GT box")
+    ap.add_argument("--resume", default=None, help="checkpoint to resume model+stage2 from")
     ap.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--out", default="ckpt/jenga")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -151,6 +212,12 @@ def main() -> None:
         train_depth_encoder=args.depth_encoder_lr > 0, device=args.device)
     stage2 = JengaStage2(in_ch=256, d_model=args.d_model, layers=args.layers,
                          heads=args.heads).to(args.device)
+
+    if args.resume:
+        rs = torch.load(args.resume, map_location=args.device, weights_only=False)
+        model.load_state_dict(rs["model"])
+        stage2.load_state_dict(rs["stage2"])
+        print(f"[resume] loaded model+stage2 from {args.resume} (epoch {rs.get('epoch','?')})", flush=True)
 
     # SAM3 (RGB) and the depth backbone each get their own LR group if unfrozen;
     # fusion + Stage-1 head + Stage-2 train at the head LR.
@@ -207,9 +274,14 @@ def main() -> None:
                 batch["vis_box2d"], batch["K"], (hf, wf), stride, args.device)
             l1 = loss1_fn(dense, tgt)
 
-            queries_uv, vis_obb = make_queries(batch, stride)
+            if args.stage2_input == "predicted":
+                queries_uv, vis_obb, s2_target = make_predicted_queries(
+                    dense, batch, stride, args.train_score_thresh, args.match_thresh)
+            else:
+                queries_uv, vis_obb = make_queries(batch, stride)
+                s2_target = batch
             out = stage2(feat, queries_uv, vis_obb, batch["catalog"])
-            l2 = loss2_fn(out, batch)
+            l2 = loss2_fn(out, s2_target)
             total = l1["total"] + l2["total"]
 
             scaler.scale(total).backward()
@@ -240,8 +312,9 @@ def main() -> None:
                 }, step=gstep)
         sched.step()
         n = max(agg["n"], 1)
-        val = validate(model, stage2, va_loader, loss2_fn, args.size,
-                       args.device, args.amp) if va_loader else {}
+        val = validate(model, stage2, va_loader, args.size, args.device, args.amp,
+                       mode=args.stage2_input, score_thresh=args.train_score_thresh,
+                       match_thresh=args.match_thresh) if va_loader else {}
         msg = (f"epoch {epoch+1:2d}/{args.epochs} | total {agg['total']/n:.4f} "
                f"(s1 {agg['s1']/n:.4f}) | assign {agg['assign']/n:.4f} "
                f"acc {agg['acc']/n:.3f} | {time.time()-t0:.0f}s")
