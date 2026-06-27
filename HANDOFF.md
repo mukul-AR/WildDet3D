@@ -16,8 +16,10 @@
   rotation = **0°** dataset-wide. It only **selects the scene's SKU** + predicts
   **per-axis extents** (the dim→axis assignment) + a **center** residual.
 - **Data:** fixed 2-SKU sim dump (corner-fix), **3,978 scenes**. Old data deprecated.
-- **Current best:** see the runs table (§6). `testing-5` (learned per-axis + ADD
-  loss) is the live attempt to fix the per-axis placement bottleneck.
+- **Current best:** `testing-5` — teacher-forced 3D IoU **0.893** (size_err
+  collapsed 11.3 → 1.5 cm, ADD 1.9 cm) via inherited rotation + learned per-axis
+  assignment + ADD loss. See §6. (Gate 0.95; this is teacher-forced — the
+  end-to-end Stage-1→Stage-2 number is still TBD.)
 - **Gate:** 3D IoU ≥ 0.95, rotation < 5° median (Perception-V3 doc).
 
 ```bash
@@ -158,12 +160,14 @@ metadata.json: intrinsics, camera_extrinsic_4x4 (cam->world),
 | **testing-2** | old (predicts rotation, canonical frame) | old | **0.809** | hid the per-axis issue via canonicalization |
 | testing-3 | + size-aware symmetry loss | old | 0.742 | **worse → reverted** (see memory) |
 | **testing-4** | corrected (inherit rotation, **heuristic** placement) | fixed | **0.730** | **size err 11.3 cm** — exposed the per-axis bug |
-| **testing-5** | corrected + **learned per-axis + ADD loss** | fixed | *(running)* | the fix; watch `size_err`↓ & IoU↑ |
+| **testing-5** | corrected + **learned per-axis + ADD loss** | fixed | **0.893** | ✅ **current best** — size_err 11.3→1.5 cm, ADD 1.9 cm, @.75 0.89, center 1.7 cm |
 
-**Diagnosis from testing-4:** assign acc 0.945, center 2.8 cm, rotation 0°, but
-**size err 11.3 cm** and ADD 5.5 cm → the dominant error is the **dim→axis
-placement** (right SKU, wrong axes). `testing-5` makes that placement learned +
-ADD-supervised.
+**Diagnosis from testing-4 → fix in testing-5:** testing-4 had assign acc 0.945,
+center 2.8 cm, rotation 0°, but **size err 11.3 cm** and ADD 5.5 cm → the dominant
+error was the **dim→axis placement** (right SKU, wrong axes). Making that placement
+learned + ADD-supervised (testing-5) collapsed size err to **1.5 cm** and lifted
+3D IoU 0.73 → **0.893**. All numbers are **teacher-forced** (GT visible boxes); the
+end-to-end (Stage-1 predictions → Stage-2) number is the next thing to measure.
 
 ⚠️ **W&B entity is `anyware-robotics`** (the script default `mukul-ganwal` fails).
 
