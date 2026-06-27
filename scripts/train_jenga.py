@@ -170,6 +170,11 @@ def main() -> None:
     ap.add_argument("--d-model", type=int, default=512)
     ap.add_argument("--layers", type=int, default=12)
     ap.add_argument("--heads", type=int, default=8)
+    ap.add_argument("--head-width", type=int, default=256, help="Stage-1 dense head channel width")
+    ap.add_argument("--head-convs", type=int, default=4, help="Stage-1 dense head conv layers per tower")
+    ap.add_argument("--tf-warmup-epochs", type=int, default=0,
+                    help="teacher-force (GT visible boxes) for the first N epochs, then use "
+                         "--stage2-input; lets a fresh Stage 1 warm up before feeding predictions")
     ap.add_argument("--w-assign", type=float, default=1.0)
     ap.add_argument("--w-center", type=float, default=1.0)
     ap.add_argument("--w-size", type=float, default=1.0, help="Stage-2 per-axis log-size L1")
@@ -210,7 +215,9 @@ def main() -> None:
     model = DenseDet3D.from_wilddet3d(
         ckpt_path=ckpt, fpn_level=args.fpn_level, train_fusion=True,
         train_encoders=args.encoder_lr > 0,
-        train_depth_encoder=args.depth_encoder_lr > 0, device=args.device)
+        train_depth_encoder=args.depth_encoder_lr > 0,
+        head_kwargs={"feat_ch": args.head_width, "n_convs": args.head_convs},
+        device=args.device)
     stage2 = JengaStage2(in_ch=256, d_model=args.d_model, layers=args.layers,
                          heads=args.heads).to(args.device)
 
@@ -258,6 +265,7 @@ def main() -> None:
     os.makedirs(args.out, exist_ok=True)
     gstep = 0
     for epoch in range(args.epochs):
+        epoch_mode = "gt" if epoch < args.tf_warmup_epochs else args.stage2_input
         model.train()
         stage2.train()
         t0 = time.time()
@@ -275,7 +283,7 @@ def main() -> None:
                 batch["vis_box2d"], batch["K"], (hf, wf), stride, args.device)
             l1 = loss1_fn(dense, tgt)
 
-            if args.stage2_input == "predicted":
+            if epoch_mode == "predicted":
                 queries_uv, vis_obb, s2_target = make_predicted_queries(
                     dense, batch, stride, args.train_score_thresh, args.match_thresh)
             else:
@@ -314,7 +322,7 @@ def main() -> None:
         sched.step()
         n = max(agg["n"], 1)
         val = validate(model, stage2, va_loader, args.size, args.device, args.amp,
-                       mode=args.stage2_input, score_thresh=args.train_score_thresh,
+                       mode=epoch_mode, score_thresh=args.train_score_thresh,
                        match_thresh=args.match_thresh) if va_loader else {}
         msg = (f"epoch {epoch+1:2d}/{args.epochs} | total {agg['total']/n:.4f} "
                f"(s1 {agg['s1']/n:.4f}) | assign {agg['assign']/n:.4f} "
