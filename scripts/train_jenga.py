@@ -109,6 +109,7 @@ def make_predicted_queries(dense, batch, stride, score_thresh, match_thresh):
         mb["act_size"].append(batch["act_size"][i][gi])
         mb["act_rot6d"].append(batch["act_rot6d"][i][gi])
         mb["assign"].append(batch["assign"][i][gi])
+    mb["catalog"] = list(batch["catalog"])  # per-scene, unchanged
     return queries_uv, vis_obb, mb
 
 
