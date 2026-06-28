@@ -92,7 +92,9 @@ def main() -> None:
     base = args.wilddet3d_ckpt or a.get("wilddet3d_ckpt")
     model = DenseDet3D.from_wilddet3d(
         ckpt_path=base if base and os.path.exists(base) else None,
-        fpn_level=a.get("fpn_level", 1), train_fusion=True, device=args.device)
+        fpn_level=a.get("fpn_level", 1), train_fusion=True,
+        head_kwargs={"feat_ch": a.get("head_width", 256), "n_convs": a.get("head_convs", 4)},
+        device=args.device)
     model.load_state_dict(ck["model"])
     stage2 = JengaStage2(in_ch=256, d_model=a.get("d_model", 512),
                          layers=a.get("layers", 12), heads=a.get("heads", 8)).to(args.device)
