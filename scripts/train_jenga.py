@@ -84,7 +84,7 @@ def make_predicted_queries(dense, batch, stride, score_thresh, match_thresh):
     dets = decode_dense(dense["heatmap"], dense["reg"], batch["K"], stride,
                         score_thresh=score_thresh)
     queries_uv, vis_obb = [], []
-    keys = ("vis_center", "vis_rot6d", "act_center", "act_size", "act_rot6d", "assign")
+    keys = ("vis_center", "vis_rot6d", "act_center", "act_size", "act_rot6d", "assign", "vis_frac")
     mb = {k: [] for k in keys}
     for i, det in enumerate(dets):
         pc, ps, pr = det["center"], det["size"], det["R"]
@@ -98,6 +98,7 @@ def make_predicted_queries(dense, batch, stride, score_thresh, match_thresh):
             mb["act_size"].append(pc.new_zeros(0, 3))
             mb["act_rot6d"].append(pc.new_zeros(0, 6))
             mb["assign"].append(pc.new_zeros(0, dtype=torch.long))
+            mb["vis_frac"].append(pc.new_zeros(0))
             continue
         gi = gi[keep]
         pc, ps, pr6 = pc[keep], ps[keep], pr[keep][:, :2].reshape(-1, 6)
@@ -109,6 +110,7 @@ def make_predicted_queries(dense, batch, stride, score_thresh, match_thresh):
         mb["act_size"].append(batch["act_size"][i][gi])
         mb["act_rot6d"].append(batch["act_rot6d"][i][gi])
         mb["assign"].append(batch["assign"][i][gi])
+        mb["vis_frac"].append(batch["vis_frac"][i][gi])
     mb["catalog"] = list(batch["catalog"])  # per-scene, unchanged
     return queries_uv, vis_obb, mb
 
@@ -329,6 +331,7 @@ def main() -> None:
                f"acc {agg['acc']/n:.3f} | {time.time()-t0:.0f}s")
         if val:
             msg += (f" || val iou {val.get('iou3d', 0):.3f} "
+                    f"(grasp {val.get('iou3d_grasp', 0):.3f}) "
                     f"(@.5 {val.get('iou_50', 0):.2f} @.75 {val.get('iou_75', 0):.2f}) "
                     f"ADD {val.get('corner_add', 0)*100:.1f}/{val.get('corner_adds', 0)*100:.1f}cm "
                     f"acc {val.get('assign_acc', 0):.3f} "

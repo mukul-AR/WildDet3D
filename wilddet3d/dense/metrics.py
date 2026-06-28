@@ -92,8 +92,9 @@ def stage2_eval_arrays(out: dict, batch: dict, n_samples: int = 4096) -> dict:
     """
     device = out["assign_logits"].device
     b = out["assign_logits"].shape[0]
-    pc, ps, pr, gc, gs, gr, correct = [], [], [], [], [], [], []
+    pc, ps, pr, gc, gs, gr, correct, vfrac = [], [], [], [], [], [], [], []
     overlaps = []
+    has_vf = "vis_frac" in batch
     for i in range(b):
         n = int(out["q_mask"][i].sum())
         if n == 0:
@@ -112,6 +113,8 @@ def stage2_eval_arrays(out: dict, batch: dict, n_samples: int = 4096) -> dict:
         gs.append(batch["act_size"][i].to(device).float())
         gr.append(rotation_6d_to_matrix(batch["act_rot6d"][i].to(device).float()))
         correct.append((assign == batch["assign"][i].to(device)).float())
+        if has_vf:
+            vfrac.append(batch["vis_frac"][i].to(device).float())
         if n >= 2:
             ii, jj = torch.triu_indices(n, n, offset=1, device=device)
             overlaps.append(
@@ -123,19 +126,22 @@ def stage2_eval_arrays(out: dict, batch: dict, n_samples: int = 4096) -> dict:
             )
     if not pc:
         z = torch.zeros(0, device=device)
-        return {"iou": z, "center_dist": z, "size_err": z, "correct": z, "overlap": z}
+        return {"iou": z, "center_dist": z, "size_err": z, "correct": z,
+                "overlap": z, "vis_frac": z}
     pc_, ps_, pr_ = torch.cat(pc), torch.cat(ps), torch.cat(pr)
     gc_, gs_, gr_ = torch.cat(gc), torch.cat(gs), torch.cat(gr)
     add = corner_distance(pc_, ps_, pr_, gc_, gs_, gr_, symmetric=False)  # ADD
     adds = corner_distance(pc_, ps_, pr_, gc_, gs_, gr_, symmetric=True)  # ADD-S
+    iou = iou3d_mc(pc_, ps_, pr_, gc_, gs_, gr_, n_samples)
     return {
-        "iou": iou3d_mc(pc_, ps_, pr_, gc_, gs_, gr_, n_samples),
+        "iou": iou,
         "center_dist": (pc_ - gc_).norm(dim=-1),
         "size_err": (ps_ - gs_).abs().sum(-1),
         "corner_add": add,
         "corner_adds": adds,
         "correct": torch.cat(correct),
         "overlap": torch.cat(overlaps) if overlaps else torch.zeros(0, device=device),
+        "vis_frac": torch.cat(vfrac) if vfrac else torch.full_like(iou, -1.0),
     }
 
 
@@ -144,7 +150,7 @@ def summarize_eval(arrays: dict) -> dict:
     iou, ov = arrays["iou"], arrays["overlap"]
     if iou.numel() == 0:
         return {}
-    return {
+    out = {
         "iou3d": iou.mean().item(),
         "iou_50": (iou > 0.5).float().mean().item(),
         "iou_75": (iou > 0.75).float().mean().item(),
@@ -156,3 +162,11 @@ def summarize_eval(arrays: dict) -> dict:
         "overlap_frac": (ov > 0.05).float().mean().item() if ov.numel() else 0.0,
         "n_boxes": int(iou.numel()),
     }
+    # graspable subset (well-visible boxes) — the deployment-relevant headline
+    vf = arrays.get("vis_frac")
+    if vf is not None and vf.numel() and bool((vf >= 0.0).any()):
+        g = vf >= 0.6
+        if int(g.sum()):
+            out["iou3d_grasp"] = iou[g].mean().item()
+            out["n_grasp"] = int(g.sum())
+    return out

@@ -137,6 +137,13 @@ def main() -> None:
     print(f"  recall @0.50 / @0.75 : {(iou>=0.5).float().mean():.3f} / {(iou>=0.75).float().mean():.3f}")
     print(f"  detection recall     : {(ctr<args.match_thresh).float().mean():.3f}  (GT with a pred within {args.match_thresh}m)")
     print(f"  precision @0.50      : {prec_hit/max(n_pred,1):.3f}")
+    print("\n  --- SYSTEM PERFORMANCE by visibility (headline = graspable boxes) ---")
+    print(f"    {'subset':<22}{'n':>7}{'meanIoU':>10}{'recall@.5':>11}{'recall@.75':>12}")
+    for thr, name in [(0.0, "all boxes"), (0.6, "graspable (vf>=.6)"), (0.9, "front (vf>=.9)")]:
+        m = vf >= thr
+        if int(m.sum()):
+            print(f"    {name:<22}{int(m.sum()):>7}{iou[m].mean():>10.3f}"
+                  f"{(iou[m]>=0.5).float().mean():>11.3f}{(iou[m]>=0.75).float().mean():>12.3f}")
     print("\n  --- TAIL DIAGNOSTIC ---")
     print("  mean IoU by visible_fraction:")
     for lo, hi in [(0.0, 0.3), (0.3, 0.6), (0.6, 0.9), (0.9, 1.01)]:
