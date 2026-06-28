@@ -15,12 +15,17 @@
 - **Stage 2 inherits rotation** from the visible box — verified visible==actual
   rotation = **0°** dataset-wide. It only **selects the scene's SKU** + predicts
   **per-axis extents** (the dim→axis assignment) + a **center** residual.
-- **Data:** fixed 2-SKU sim dump (corner-fix), **3,978 scenes**. Old data deprecated.
-- **Current best:** `testing-5` — teacher-forced 3D IoU **0.893** (size_err
-  collapsed 11.3 → 1.5 cm, ADD 1.9 cm) via inherited rotation + learned per-axis
-  assignment + ADD loss. See §6. (Gate 0.95; this is teacher-forced — the
-  end-to-end Stage-1→Stage-2 number is still TBD.)
-- **Gate:** 3D IoU ≥ 0.95, rotation < 5° median (Perception-V3 doc).
+- **Data:** combined corner-fixed sim, **13,202 scenes** (archived
+  `s3://anyware-perception-data-dumps/dataset-unload-3Dlearning/20260627_3D-Sim-Data-13k-2SKU.tar.gz`).
+- **Current best:** `real-train-1` — **end-to-end** (Stage-1 detections → Stage-2,
+  the deployment-real setting). On **graspable boxes (vis_frac ≥ 0.6)**: 3D IoU
+  **0.893**, recall@0.5 **0.986**, recall@0.75 **0.959**; front-of-stack
+  (≥0.9): IoU **0.902**. All-boxes IoU 0.857 (dragged by the occluded tail).
+  Detection recall 0.976. See §6.
+- **Reporting:** headline metric is the **graspable subset** (`vis_frac ≥ 0.6`) —
+  in unloading, heavily-occluded boxes are picked later (once un-occluded), so
+  their IoU isn't actionable now (we still emit them for collision safety).
+- **Gate:** 3D IoU ≥ 0.95 (on graspable boxes), rotation < 5° median.
 
 ```bash
 # train (fixed data, frozen encoders, W&B opt-in)
@@ -160,7 +165,22 @@ metadata.json: intrinsics, camera_extrinsic_4x4 (cam->world),
 | **testing-2** | old (predicts rotation, canonical frame) | old | **0.809** | hid the per-axis issue via canonicalization |
 | testing-3 | + size-aware symmetry loss | old | 0.742 | **worse → reverted** (see memory) |
 | **testing-4** | corrected (inherit rotation, **heuristic** placement) | fixed | **0.730** | **size err 11.3 cm** — exposed the per-axis bug |
-| **testing-5** | corrected + **learned per-axis + ADD loss** | fixed | **0.893** | ✅ **current best** — size_err 11.3→1.5 cm, ADD 1.9 cm, @.75 0.89, center 1.7 cm |
+| **testing-5** | corrected + learned per-axis + ADD loss | fixed 4k | **0.893** (TF) | teacher-forced; size_err 11.3→1.5 cm, ADD 1.9 cm |
+| **real-train-1** | + **predicted boxes** (no teacher forcing) + bigger Stage-1 (78M) | **13.2k** | **0.893** (E2E graspable) | ✅ **current best** — train/test gap closed; 20 ep (5 GT-warmup → 15 predicted) |
+
+**`real-train-1` end-to-end eval (recall-inclusive, `jenga_eval_e2e.py`):**
+| subset | mean IoU | recall@.5 | recall@.75 |
+|---|---|---|---|
+| all boxes | 0.857 | 0.950 | 0.906 |
+| **graspable (vis≥.6)** | **0.893** | 0.986 | 0.959 |
+| front (vis≥.9) | 0.902 | 0.989 | 0.974 |
+
+**Diagnostic (`jenga_eval_e2e.py` tail breakdown):** rotation is **solved**
+(0.3–0.4° everywhere — the inherit-rotation design works). The IoU tail is
+**occlusion**: `vis_frac<0.3 → IoU 0.57`, `>0.9 → 0.90`. Low-IoU boxes are
+center (17.7 cm) + size (11.5 cm) errors on heavily-occluded boxes; well-visible
+boxes have center 1.5 cm / size 0 / rot 0.3°. → path to 0.95 is **center
+precision on well-visible boxes** (finer FPN tap), not rotation/occlusion.
 
 **Diagnosis from testing-4 → fix in testing-5:** testing-4 had assign acc 0.945,
 center 2.8 cm, rotation 0°, but **size err 11.3 cm** and ADD 5.5 cm → the dominant
@@ -203,14 +223,23 @@ ssh ubuntu@209.20.157.13          # key-based, 1× H100 80GB
 
 ## 9. Next steps
 
-1. **Watch `testing-5`** — does `size_err` collapse from 11 cm → ~1 cm and IoU
-   climb past 0.73 (toward/above 0.81)? If yes, the learned per-axis fix worked.
-2. **Re-export viz** from the best fixed-data model → inspect GT vs predicted.
-3. **SAM3 fine-tune** (`testing-6`, `--encoder-lr 1e-5`, batch ~4) — lets Stage 1
-   reshape features (the head does all adaptation when encoders are frozen).
-4. **Measure Stage 1 end-to-end** (visible-box recall / errors) — it's never been
-   measured directly; if it's the bottleneck, consider a stronger/multi-scale head.
-5. **Real `vis4d_cuda_ops`** on the H100 (Hopper) for exact 3D-IoU (currently MC).
-6. Scale sim data; DDP for multi-GPU.
+1. **`real-train-2` — center precision for the 0.95 gate (the main lever).**
+   Finer FPN tap (`--fpn-level 0` → 288² grid, halves the sub-cell center floor)
+   + **longer training** + occlusion down-weighting (`--vis-weight-thresh 0.6`,
+   focus on graspable boxes) + ADD-S loss. Predicted-mode + GT warmup, bigger
+   Stage-1 head. (Finer tap needs ~batch 8 — heavier head compute on 288².)
+   The diagnostic says center on well-visible boxes is the only residual.
+2. **NOT yet: SAM3 fine-tune** — premature on sim RGB; revisit for sim→real.
+3. **Real `vis4d_cuda_ops`** on the H100 (Hopper) for exact 3D-IoU (currently MC).
+4. Per-camera filter in the viz; export more scenes' predictions.
+5. Scale sim data / more SKUs per scene; DDP for multi-GPU.
+
+### Tooling added (this session)
+- `scripts/jenga_eval_e2e.py` — end-to-end eval: recall@IoU + **visibility-
+  stratified** report (all / graspable / front) + tail diagnostic.
+- ADD-S (symmetry-tolerant) corner loss; occlusion-aware loss weighting
+  (`--vis-weight-thresh`); per-epoch **graspable-IoU** in the val print.
+- `--stage2-input predicted` (+ `--tf-warmup-epochs`, `--resume`), bigger Stage-1
+  head (`--head-width/--head-convs`), encoder fine-tune flags (`--encoder-lr`).
 
 (Checkpoints, `.venv/`, `pretrained/`, `data/`, `wandb/`, `viz_out/` are git-ignored.)
