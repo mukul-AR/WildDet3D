@@ -127,9 +127,10 @@ class SimJengaDataset(Dataset):
             return c.astype(np.float32), r.astype(np.float32), geom.astype(np.float32)
 
         vis_c, vis_s, vis_r, vis_b = [], [], [], []
-        act_c, act_s, act_r, assign = [], [], [], []
+        act_c, act_s, act_r, assign, vis_frac = [], [], [], [], []
         for b in meta["boxes"].values():
-            if b.get("visible_fraction", 1.0) < self.min_visible:
+            vf = b.get("visible_fraction", 1.0)
+            if vf < self.min_visible:
                 continue
             vc, v_r, vg = cam_obb(
                 np.array(b["visible_extrinsic_4x4"], dtype=np.float64),
@@ -165,6 +166,7 @@ class SimJengaDataset(Dataset):
             act_s.append(ag.tolist())  # native per-axis extents
             act_r.append(a_r[:2].reshape(6).tolist())  # native R_act (== R_vis)
             assign.append(assign_index(np.sort(ag), catalog))
+            vis_frac.append(float(vf))
 
         n = len(vis_c)
 
@@ -184,6 +186,7 @@ class SimJengaDataset(Dataset):
             "act_rot6d": t(act_r, 6),
             "catalog": torch.from_numpy(catalog),
             "assign": torch.tensor(assign, dtype=torch.long),
+            "vis_frac": torch.tensor(vis_frac, dtype=torch.float32).reshape(n),
         }
 
 
@@ -199,6 +202,7 @@ def jenga_collate(batch: list[dict]) -> dict:
         "act_rot6d",
         "catalog",
         "assign",
+        "vis_frac",
     ]
     out = {
         "image": torch.stack([b["image"] for b in batch]),

@@ -57,6 +57,26 @@ def iou3d_mc(
     return inter / union
 
 
+def corner_distance(
+    c1: Tensor, s1: Tensor, r1: Tensor,
+    c2: Tensor, s2: Tensor, r2: Tensor,
+    symmetric: bool = True,
+) -> Tensor:
+    """Per-box corner distance ``[N]`` between two oriented boxes.
+
+    ``symmetric=False`` = ADD (fixed corner correspondence — orientation/label
+    sensitive). ``symmetric=True`` = ADD-S (each predicted corner to its nearest
+    GT corner — tolerant of the cuboid's symmetric rotation relabelings). Both
+    differentiable, so ADD-S is usable as a loss that doesn't fight rotation
+    symmetry.
+    """
+    cp = box_corners(c1, s1, r1)  # [N, 8, 3]
+    cg = box_corners(c2, s2, r2)
+    if symmetric:
+        return torch.cdist(cp, cg).min(dim=2).values.mean(dim=-1)  # ADD-S
+    return (cp - cg).norm(dim=-1).mean(dim=-1)  # ADD
+
+
 @torch.no_grad()
 def stage2_eval_arrays(out: dict, batch: dict, n_samples: int = 4096) -> dict:
     """Per-query teacher-forced eval arrays for the Stage-2 actual-box outputs.
@@ -106,10 +126,8 @@ def stage2_eval_arrays(out: dict, batch: dict, n_samples: int = 4096) -> dict:
         return {"iou": z, "center_dist": z, "size_err": z, "correct": z, "overlap": z}
     pc_, ps_, pr_ = torch.cat(pc), torch.cat(ps), torch.cat(pr)
     gc_, gs_, gr_ = torch.cat(gc), torch.cat(gs), torch.cat(gr)
-    cp = box_corners(pc_, ps_, pr_)  # [N, 8, 3]
-    cg = box_corners(gc_, gs_, gr_)
-    add = (cp - cg).norm(dim=-1).mean(dim=-1)  # fixed correspondence -> orientation-sensitive
-    adds = torch.cdist(cp, cg).min(dim=2).values.mean(dim=-1)  # nearest corner -> symmetry-tolerant
+    add = corner_distance(pc_, ps_, pr_, gc_, gs_, gr_, symmetric=False)  # ADD
+    adds = corner_distance(pc_, ps_, pr_, gc_, gs_, gr_, symmetric=True)  # ADD-S
     return {
         "iou": iou3d_mc(pc_, ps_, pr_, gc_, gs_, gr_, n_samples),
         "center_dist": (pc_ - gc_).norm(dim=-1),

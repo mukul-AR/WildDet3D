@@ -6,7 +6,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from wilddet3d.dense.metrics import box_corners
+from wilddet3d.dense.metrics import corner_distance
 from wilddet3d.dense.rotation_utils import (
     rad2deg,
     rotation_6d_to_matrix,
@@ -171,9 +171,12 @@ class JengaStage2Loss(nn.Module):
         loss_assign = F.cross_entropy(pa_c, ta_c)
         loss_center = (pc_c - tc_c).abs().mean()
         loss_size = (psz_c.clamp_min(1e-3).log() - tsz_c.clamp_min(1e-3).log()).abs().mean()
-        cp = box_corners(pc_c, psz_c, rotation_6d_to_matrix(pr_c))
-        cg = box_corners(tc_c, tsz_c, rotation_6d_to_matrix(gr_c))
-        loss_add = (cp - cg).norm(dim=-1).mean()
+        # ADD-S (symmetry-tolerant): doesn't fight Stage-1's symmetric rotation
+        # relabelings, so it cleanly supervises size + center.
+        loss_add = corner_distance(
+            pc_c, psz_c, rotation_6d_to_matrix(pr_c),
+            tc_c, tsz_c, rotation_6d_to_matrix(gr_c), symmetric=True,
+        ).mean()
         total = (
             self.w_assign * loss_assign + self.w_center * loss_center
             + self.w_size * loss_size + self.w_add * loss_add
