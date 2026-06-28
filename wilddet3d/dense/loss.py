@@ -130,21 +130,29 @@ class JengaStage2Loss(nn.Module):
         w_center: actual-center L1 weight.
         w_size: per-axis log-size L1 weight.
         w_add: corner-distance (ADD) weight.
+        vis_weight_thresh: if > 0, down-weight per-box losses by
+            ``clamp(vis_frac / thresh, floor, 1)`` so capacity focuses on
+            graspable (well-visible) boxes; heavily-occluded boxes keep a small
+            floor weight (still emit a sane box for collision). 0 = uniform.
+        vis_weight_floor: minimum per-box weight for occluded boxes.
     """
 
     def __init__(
         self, w_assign: float = 1.0, w_center: float = 1.0,
         w_size: float = 1.0, w_add: float = 1.0,
+        vis_weight_thresh: float = 0.0, vis_weight_floor: float = 0.1,
     ) -> None:
         super().__init__()
         self.w_assign, self.w_center = w_assign, w_center
         self.w_size, self.w_add = w_size, w_add
+        self.vis_weight_thresh, self.vis_weight_floor = vis_weight_thresh, vis_weight_floor
 
     def forward(self, out: dict, batch: dict) -> dict:
         device = out["assign_logits"].device
         logits, dc, lsz = out["assign_logits"], out["center_delta"], out["log_size"]
         b = logits.shape[0]
-        pa, pc, psz, pr, ta, tc, tsz, gr = [], [], [], [], [], [], [], []
+        pa, pc, psz, pr, ta, tc, tsz, gr, vf = [], [], [], [], [], [], [], [], []
+        has_vf = "vis_frac" in batch
         for i in range(b):
             n = int(out["q_mask"][i].sum())
             if n == 0:
@@ -157,6 +165,8 @@ class JengaStage2Loss(nn.Module):
             tc.append(batch["act_center"][i].to(device))
             tsz.append(batch["act_size"][i].to(device))  # native per-axis
             gr.append(batch["act_rot6d"][i].to(device))
+            if has_vf:
+                vf.append(batch["vis_frac"][i].to(device))
         if not pa:
             z = torch.zeros((), device=device)
             return {
@@ -168,15 +178,23 @@ class JengaStage2Loss(nn.Module):
         psz_c, tsz_c = torch.cat(psz), torch.cat(tsz)
         pr_c, gr_c = torch.cat(pr), torch.cat(gr)
 
-        loss_assign = F.cross_entropy(pa_c, ta_c)
-        loss_center = (pc_c - tc_c).abs().mean()
-        loss_size = (psz_c.clamp_min(1e-3).log() - tsz_c.clamp_min(1e-3).log()).abs().mean()
+        # per-box weights: focus on graspable boxes (occluded ones keep a floor)
+        if self.vis_weight_thresh > 0 and vf:
+            w = (torch.cat(vf) / self.vis_weight_thresh).clamp(self.vis_weight_floor, 1.0)
+        else:
+            w = torch.ones_like(ta_c, dtype=torch.float32)
+        ws = w.sum().clamp_min(1.0)
+
+        loss_assign = (F.cross_entropy(pa_c, ta_c, reduction="none") * w).sum() / ws
+        loss_center = ((pc_c - tc_c).abs().mean(-1) * w).sum() / ws
+        loss_size = ((psz_c.clamp_min(1e-3).log() - tsz_c.clamp_min(1e-3).log()).abs().mean(-1) * w).sum() / ws
         # ADD-S (symmetry-tolerant): doesn't fight Stage-1's symmetric rotation
         # relabelings, so it cleanly supervises size + center.
-        loss_add = corner_distance(
+        add_per = corner_distance(
             pc_c, psz_c, rotation_6d_to_matrix(pr_c),
             tc_c, tsz_c, rotation_6d_to_matrix(gr_c), symmetric=True,
-        ).mean()
+        )
+        loss_add = (add_per * w).sum() / ws
         total = (
             self.w_assign * loss_assign + self.w_center * loss_center
             + self.w_size * loss_size + self.w_add * loss_add

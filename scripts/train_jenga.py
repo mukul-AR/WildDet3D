@@ -181,6 +181,9 @@ def main() -> None:
     ap.add_argument("--w-center", type=float, default=1.0)
     ap.add_argument("--w-size", type=float, default=1.0, help="Stage-2 per-axis log-size L1")
     ap.add_argument("--w-add", type=float, default=1.0, help="Stage-2 corner-distance (ADD)")
+    ap.add_argument("--vis-weight-thresh", type=float, default=0.0,
+                    help="if > 0, down-weight Stage-2 loss for occluded boxes "
+                         "(clamp(vis_frac/thresh, floor, 1)); focuses on graspable boxes")
     ap.add_argument("--stage2-input", default="gt", choices=["gt", "predicted"],
                     help="gt = teacher-forced (GT visible boxes); predicted = end-to-end "
                          "(Stage-1 detections matched to GT) — the real deployment setting")
@@ -245,7 +248,8 @@ def main() -> None:
           flush=True)
 
     loss1_fn = DenseDet3DLoss()
-    loss2_fn = JengaStage2Loss(args.w_assign, args.w_center, args.w_size, args.w_add)
+    loss2_fn = JengaStage2Loss(args.w_assign, args.w_center, args.w_size, args.w_add,
+                               vis_weight_thresh=args.vis_weight_thresh)
     groups = [{"params": head_params, "lr": args.lr}]
     if sam_params:
         groups.append({"params": sam_params, "lr": args.encoder_lr})
