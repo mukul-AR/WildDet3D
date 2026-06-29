@@ -271,6 +271,12 @@ def main() -> None:
         wb = wandb.init(project=args.wandb_project, entity=args.wandb_entity or None,
                         name=args.wandb_run_name, config=vars(args),
                         tags=["jenga", "two-stage", "9dof", "dim-conditioned"])
+        # Plot per-epoch metrics against `epoch`, not the global step — batch-size
+        # differences (e.g. bs16 vs bs8 => ~2x steps/epoch) misalign runs on the
+        # step axis. train/* stays on step for high-res loss curves.
+        wb.define_metric("epoch")
+        wb.define_metric("val/*", step_metric="epoch")
+        wb.define_metric("epoch/*", step_metric="epoch")
         print(f"[wandb] logging to {args.wandb_project} as '{args.wandb_run_name}'", flush=True)
 
     os.makedirs(args.out, exist_ok=True)

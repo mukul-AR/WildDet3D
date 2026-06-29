@@ -26,6 +26,11 @@
   in unloading, heavily-occluded boxes are picked later (once un-occluded), so
   their IoU isn't actionable now (we still emit them for collision safety).
 - **Gate:** 3D IoU ≥ 0.95 (on graspable boxes), rotation < 5° median.
+- **Status (2026-06-29):** `real-train-2` (finer FPN grid) was a **dead end** —
+  killed at epoch 18, E2E graspable **0.828** (worse than r1 across the board; §6).
+  Active run: **`depth-unfreeze-1`** — r1 config + partial **LingBot-depth encoder
+  unfreeze** (last 4/24 blocks @ 1e-6), 25 ep → `ckpt/real3`. The 0.95 lever is now
+  **depth-axis center precision** (per-axis diagnostic, §6), not a finer grid.
 
 ```bash
 # train (fixed data, frozen encoders, W&B opt-in)
@@ -129,14 +134,16 @@ metadata.json: intrinsics, camera_extrinsic_4x4 (cam->world),
   see §6 testing-3).
 - **Stage 2** (`JengaStage2Loss`): `assign CE + center L1 + per-axis size L1 +
   ADD corner`. No rotation term (inherited).
-- **Teacher forcing:** Stage 2 trains on GT visible boxes; inference chains
-  Stage-1 predictions → Stage-2 (`decode_jenga`). ⚠️ Val metrics are therefore
-  *optimistic* (assume perfect visible detection). **Stage-1 quality is never
-  measured end-to-end yet** — a known gap.
+- **Teacher forcing vs predicted:** `--stage2-input gt` trains Stage 2 on GT
+  visible boxes (optimistic val); `--stage2-input predicted` (+ `--tf-warmup-epochs`)
+  feeds Stage-1's own detections — the deployment-real setting used by real-train-1.
+  End-to-end quality is measured by `jenga_eval_e2e.py` (§5).
 - **Joint loss**, encoders frozen by default; single GPU.
-- **Optional encoder fine-tune:** `--encoder-lr 1e-5` unfreezes **SAM3 (RGB)**;
-  `--depth-encoder-lr` unfreezes the depth backbone (default 0 = frozen). Uses
-  discriminative LR groups. Heavy (batch must drop to ~2–4). Not yet run.
+- **Encoder fine-tune:** `--encoder-lr` unfreezes **SAM3 (RGB)**; `--depth-encoder-lr`
+  unfreezes the **LingBot-depth** backbone; `--depth-unfreeze-blocks N` unfreezes
+  only the **last N/24 depth blocks + final norm** (memory-bounded partial fine-tune,
+  optimizer groups by `requires_grad`). Active in `depth-unfreeze-1` (last 4 @ 1e-6;
+  batch 8 = 18/80 GB — large headroom).
 - CLI knobs: `--d-model/--layers/--heads`, `--w-assign/--w-center/--w-size/--w-add`,
   `--val-frac`, `--encoder-lr/--depth-encoder-lr`.
 
@@ -167,6 +174,8 @@ metadata.json: intrinsics, camera_extrinsic_4x4 (cam->world),
 | **testing-4** | corrected (inherit rotation, **heuristic** placement) | fixed | **0.730** | **size err 11.3 cm** — exposed the per-axis bug |
 | **testing-5** | corrected + learned per-axis + ADD loss | fixed 4k | **0.893** (TF) | teacher-forced; size_err 11.3→1.5 cm, ADD 1.9 cm |
 | **real-train-1** | + **predicted boxes** (no teacher forcing) + bigger Stage-1 (78M) | **13.2k** | **0.893** (E2E graspable) | ✅ **current best** — train/test gap closed; 20 ep (5 GT-warmup → 15 predicted) |
+| real-train-2 | finer FPN (`fpn-0`, 288²) + head 384/4 + vis-weight 0.6 | 13.2k | 0.828 (E2E graspable) | ❌ **killed @ e18** — finer grid worse on every metric + over-predicting; dead end (see diagnostic) |
+| **depth-unfreeze-1** | r1 config + **LingBot-depth last-4-block unfreeze @ 1e-6** | 13.2k | *running* | testing depth-axis center precision; 25 ep → `ckpt/real3`, W&B `depth-unfreeze-1` |
 
 **`real-train-1` end-to-end eval (recall-inclusive, `jenga_eval_e2e.py`):**
 | subset | mean IoU | recall@.5 | recall@.75 |
@@ -177,10 +186,22 @@ metadata.json: intrinsics, camera_extrinsic_4x4 (cam->world),
 
 **Diagnostic (`jenga_eval_e2e.py` tail breakdown):** rotation is **solved**
 (0.3–0.4° everywhere — the inherit-rotation design works). The IoU tail is
-**occlusion**: `vis_frac<0.3 → IoU 0.57`, `>0.9 → 0.90`. Low-IoU boxes are
-center (17.7 cm) + size (11.5 cm) errors on heavily-occluded boxes; well-visible
-boxes have center 1.5 cm / size 0 / rot 0.3°. → path to 0.95 is **center
-precision on well-visible boxes** (finer FPN tap), not rotation/occlusion.
+**occlusion**: `vis_frac<0.3 → IoU 0.57`, `>0.9 → 0.90`. Well-visible boxes have
+center 1.5 cm / size 0 / rot 0.3° — the **only residual on graspable boxes is
+center precision**.
+
+**Per-axis center diagnostic (free — from exported preds, no GPU; rotate pred−GT
+error into the camera frame).** On graspable boxes the error is **zero-mean,
+isotropic variance**: no bias, no correlation with box size (so a geometric
+depth-anchor has nothing to exploit). **Image-plane is already saturated at
+~0.46 cm (≈ ½ pixel)**; the worst axis is **depth (0.74 cm, 43% of the energy),
+and it grows with range** (0.93 cm < 1.5 m → 1.47 cm at 2–2.5 m). This is exactly
+**why finer FPN (`real-train-2`) failed** — it sharpens the already-saturated
+image-plane axis. The lever is therefore **letting the depth features adapt**
+(`depth-unfreeze-1`), not grid resolution. *Tabled:* `w_add=0` (ADD-S cleanup,
+only if other levers are exhausted); multi-view triangulation — **54% of graspable
+boxes are single-camera**, so it's only a partial fix. Sim depth is clean and ZED
+gives good metric depth, so this precision work transfers.
 
 **Diagnosis from testing-4 → fix in testing-5:** testing-4 had assign acc 0.945,
 center 2.8 cm, rotation 0°, but **size err 11.3 cm** and ADD 5.5 cm → the dominant
@@ -223,16 +244,24 @@ ssh ubuntu@209.20.157.13          # key-based, 1× H100 80GB
 
 ## 9. Next steps
 
-1. **`real-train-2` — center precision for the 0.95 gate (the main lever).**
-   Finer FPN tap (`--fpn-level 0` → 288² grid, halves the sub-cell center floor)
-   + **longer training** + occlusion down-weighting (`--vis-weight-thresh 0.6`,
-   focus on graspable boxes) + ADD-S loss. Predicted-mode + GT warmup, bigger
-   Stage-1 head. (Finer tap needs ~batch 8 — heavier head compute on 288².)
-   The diagnostic says center on well-visible boxes is the only residual.
-2. **NOT yet: SAM3 fine-tune** — premature on sim RGB; revisit for sim→real.
-3. **Real `vis4d_cuda_ops`** on the H100 (Hopper) for exact 3D-IoU (currently MC).
-4. Per-camera filter in the viz; export more scenes' predictions.
-5. Scale sim data / more SKUs per scene; DDP for multi-GPU.
+1. **`depth-unfreeze-1` (running) — depth-axis center precision.** r1 config +
+   partial LingBot-depth unfreeze (last 4/24 blocks @ 1e-6), 25 ep → `ckpt/real3`.
+   Hypothesis: adapting the depth features cuts the range-dependent **depth-axis**
+   center variance (§6) below r1's 1.7 cm floor. Watch epochs 16–25. **No
+   auto-eval queued** behind it — add an `evalreal3` waiter if wanted. GPU headroom
+   is large (batch 8 = 18/80 GB) → the next iteration can afford batch 16 and/or
+   more unfrozen blocks if this responds.
+2. **Tabled levers** (in order): raw metric-depth skip into the center head;
+   `w_add=0` (ADD-S cleanup); multi-view fusion (partial — 54% single-camera).
+3. **Sim→real / ZED:** depth-realism augmentation; a real-data validation track is
+   the biggest unmeasured risk (everything so far is clean-depth sim).
+4. **NOT yet: SAM3 (RGB) fine-tune** — premature on sim RGB.
+5. **Real `vis4d_cuda_ops`** on the H100 (Hopper) for exact 3D-IoU (currently MC);
+   per-camera viz filter; export more scenes' preds; DDP for multi-GPU.
+
+### Confirmed dead ends (don't re-run)
+- **Finer FPN grid** (`--fpn-level 0`, real-train-2): E2E graspable 0.893 → **0.828**.
+- **Size-aware symmetry loss** (testing-3): IoU 0.81 → 0.74.
 
 ### Tooling added (this session)
 - `scripts/jenga_eval_e2e.py` — end-to-end eval: recall@IoU + **visibility-
