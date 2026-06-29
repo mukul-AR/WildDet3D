@@ -41,6 +41,7 @@ class DenseDet3D(nn.Module):
         train_fusion: bool = True,
         train_encoders: bool = False,
         train_depth_encoder: bool = False,
+        depth_unfreeze_blocks: int = 0,
         head_kwargs: dict | None = None,
     ) -> None:
         super().__init__()
@@ -58,8 +59,26 @@ class DenseDet3D(nn.Module):
         # LayerNorm needs no running stats) — see train().
         for p in self.backbone.parameters():
             p.requires_grad_(train_encoders)
-        for p in self.geometry_backend.parameters():
-            p.requires_grad_(train_depth_encoder)
+        # Depth (LingBot) backbone. depth_unfreeze_blocks>0 unfreezes ONLY the
+        # last N encoder blocks (+ final norm) for a low-LR, memory-bounded
+        # fine-tune; 0 keeps the legacy all-or-nothing behaviour. The optimizer
+        # groups by requires_grad, so a partial unfreeze is picked up cleanly.
+        self.depth_unfreeze_blocks = depth_unfreeze_blocks
+        if train_depth_encoder and depth_unfreeze_blocks > 0:
+            for p in self.geometry_backend.parameters():
+                p.requires_grad_(False)
+            bb = self.geometry_backend.encoder.backbone
+            nb = len(bb.blocks)
+            k = min(depth_unfreeze_blocks, nb)
+            for i in range(nb - k, nb):
+                for p in bb.blocks[i].parameters():
+                    p.requires_grad_(True)
+            for p in bb.norm.parameters():
+                p.requires_grad_(True)
+            print(f"[DenseDet3D] depth backbone: unfroze last {k}/{nb} blocks + norm")
+        else:
+            for p in self.geometry_backend.parameters():
+                p.requires_grad_(train_depth_encoder)
         if not train_fusion:
             for p in self.early_depth_fusion.parameters():
                 p.requires_grad_(False)
@@ -141,6 +160,7 @@ class DenseDet3D(nn.Module):
         train_fusion: bool = True,
         train_encoders: bool = False,
         train_depth_encoder: bool = False,
+        depth_unfreeze_blocks: int = 0,
         head_kwargs: dict | None = None,
         device: str = "cuda",
     ) -> "DenseDet3D":
@@ -202,6 +222,7 @@ class DenseDet3D(nn.Module):
             train_fusion=train_fusion,
             train_encoders=train_encoders,
             train_depth_encoder=train_depth_encoder,
+            depth_unfreeze_blocks=depth_unfreeze_blocks,
             head_kwargs=head_kwargs,
         )
         del wd

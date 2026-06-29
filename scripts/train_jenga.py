@@ -162,6 +162,10 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--encoder-lr", type=float, default=0.0,
                     help="if > 0, unfreeze the SAM3 (RGB) backbone and fine-tune it at this LR")
+    ap.add_argument("--depth-unfreeze-blocks", type=int, default=0,
+                    help="Unfreeze only the last N LingBot-depth encoder blocks (+norm) "
+                         "for a memory-bounded low-LR fine-tune; 0 = full unfreeze when "
+                         "--depth-encoder-lr>0. Needs --depth-encoder-lr>0 to take effect.")
     ap.add_argument("--depth-encoder-lr", type=float, default=0.0,
                     help="if > 0, unfreeze the LingBot depth backbone at this LR (default: frozen)")
     ap.add_argument("--workers", type=int, default=4)
@@ -221,6 +225,7 @@ def main() -> None:
         ckpt_path=ckpt, fpn_level=args.fpn_level, train_fusion=True,
         train_encoders=args.encoder_lr > 0,
         train_depth_encoder=args.depth_encoder_lr > 0,
+        depth_unfreeze_blocks=args.depth_unfreeze_blocks,
         head_kwargs={"feat_ch": args.head_width, "n_convs": args.head_convs},
         device=args.device)
     stage2 = JengaStage2(in_ch=256, d_model=args.d_model, layers=args.layers,
