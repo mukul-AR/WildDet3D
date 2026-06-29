@@ -144,8 +144,21 @@ metadata.json: intrinsics, camera_extrinsic_4x4 (cam->world),
   only the **last N/24 depth blocks + final norm** (memory-bounded partial fine-tune,
   optimizer groups by `requires_grad`). Active in `depth-unfreeze-1` (last 4 @ 1e-6;
   batch 8 = 18/80 GB — large headroom).
+- **RGB feature cache (`--feat-cache-dir`) — ~1.66×/step.** The SAM3 RGB backbone is
+  frozen and the dataset applies **no augmentation**, so its FPN output is a
+  deterministic function of the image → cacheable. `scripts/precompute_feat_cache.py`
+  writes one fp16 `.npy` per view (just the head-read level `backbone_fpn[fpn_level]`);
+  the trainer then **skips the SAM3 forward**. Measured **~1.66×/step** on an
+  RTX 5090 (SAM3 = ~40% of a fwd+bwd step; the depth path is ~equal cost — so a
+  *fully-frozen* run could also cache the fused features for ~5×, but while the depth
+  encoder is unfrozen only the RGB half is cacheable). **Opt-in**, defaults
+  byte-identical; predictions (`heatmap`/`reg`) verified **bitwise-identical** to the
+  uncached path (raw `feat` 0.14% from fp16 storage). Manifest-validated
+  (ckpt/fpn/size) + guarded to require the RGB backbone frozen (`--encoder-lr 0`).
+  Cache for `data_combined` (~39.6k views @ `[256,144,144]`) ≈ **420 GB** on disk
+  (fits the H100's 776 GB; ~half streams from NVMe), ~1 h one-time precompute.
 - CLI knobs: `--d-model/--layers/--heads`, `--w-assign/--w-center/--w-size/--w-add`,
-  `--val-frac`, `--encoder-lr/--depth-encoder-lr`.
+  `--val-frac`, `--encoder-lr/--depth-encoder-lr`, `--feat-cache-dir`.
 
 ---
 
@@ -250,7 +263,8 @@ ssh ubuntu@209.20.157.13          # key-based, 1× H100 80GB
    center variance (§6) below r1's 1.7 cm floor. Watch epochs 16–25. **No
    auto-eval queued** behind it — add an `evalreal3` waiter if wanted. GPU headroom
    is large (batch 8 = 18/80 GB) → the next iteration can afford batch 16 and/or
-   more unfrozen blocks if this responds.
+   more unfrozen blocks if this responds — and should add **`--feat-cache-dir`**
+   (~1.66×/step; §4) once `depth-unfreeze-1` frees the GPU for the ~1 h precompute.
 2. **Tabled levers** (in order): raw metric-depth skip into the center head;
    `w_add=0` (ADD-S cleanup); multi-view fusion (partial — 54% single-camera).
 3. **Sim→real / ZED:** depth-realism augmentation; a real-data validation track is
@@ -270,5 +284,8 @@ ssh ubuntu@209.20.157.13          # key-based, 1× H100 80GB
   (`--vis-weight-thresh`); per-epoch **graspable-IoU** in the val print.
 - `--stage2-input predicted` (+ `--tf-warmup-epochs`, `--resume`), bigger Stage-1
   head (`--head-width/--head-convs`), encoder fine-tune flags (`--encoder-lr`).
+- `scripts/precompute_feat_cache.py` + `--feat-cache-dir` — cache the frozen SAM3
+  RGB FPN to skip its forward (~1.66×/step; opt-in, manifest-validated, verified
+  prediction-identical). See §4. Recipe: precompute once, then add the one flag.
 
 (Checkpoints, `.venv/`, `pretrained/`, `data/`, `wandb/`, `viz_out/` are git-ignored.)
