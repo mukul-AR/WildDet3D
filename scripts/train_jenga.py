@@ -271,11 +271,11 @@ def main() -> None:
         wb = wandb.init(project=args.wandb_project, entity=args.wandb_entity or None,
                         name=args.wandb_run_name, config=vars(args),
                         tags=["jenga", "two-stage", "9dof", "dim-conditioned"])
-        # Plot per-epoch metrics against `epoch`, not the global step — batch-size
-        # differences (e.g. bs16 vs bs8 => ~2x steps/epoch) misalign runs on the
-        # step axis. train/* stays on step for high-res loss curves.
+        # Keep BOTH axes: train/* and val/* on the global step (within-run debugging
+        # dynamics), and an epoch-indexed copy (epoch/*) on `epoch` for clean
+        # cross-run comparison — batch-size differences (bs16 vs bs8 => ~2x
+        # steps/epoch) misalign runs on the step axis but line up on epoch.
         wb.define_metric("epoch")
-        wb.define_metric("val/*", step_metric="epoch")
         wb.define_metric("epoch/*", step_metric="epoch")
         print(f"[wandb] logging to {args.wandb_project} as '{args.wandb_run_name}'", flush=True)
 
@@ -355,7 +355,8 @@ def main() -> None:
         if wb is not None:
             log = {"epoch/total": agg["total"] / n, "epoch/assign_acc": agg["acc"] / n,
                    "epoch": epoch + 1}
-            log.update({f"val/{k}": v for k, v in val.items()})
+            log.update({f"val/{k}": v for k, v in val.items()})        # step axis (dynamics)
+            log.update({f"epoch/val_{k}": v for k, v in val.items()})  # epoch axis (run comparison)
             wb.log(log, step=gstep)
         torch.save({"model": model.state_dict(), "stage2": stage2.state_dict(),
                     "epoch": epoch + 1, "args": vars(args)},
