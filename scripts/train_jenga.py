@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -115,6 +116,34 @@ def make_predicted_queries(dense, batch, stride, score_thresh, match_thresh):
     return queries_uv, vis_obb, mb
 
 
+def validate_feat_cache(cache_dir: str, args) -> None:
+    """Fail loud if a precomputed RGB-FPN cache doesn't match this run's config.
+
+    The cache is only valid for the exact (wilddet3d-ckpt, fpn-level, size) it
+    was built with — using a stale one would silently train on wrong features.
+    """
+    assert args.encoder_lr == 0, (
+        "--feat-cache-dir requires the SAM3 RGB backbone frozen (--encoder-lr 0); "
+        "cached features are stale if the backbone trains."
+    )
+    meta_p = os.path.join(cache_dir, "meta.json")
+    if not os.path.exists(meta_p):
+        print(f"WARN: {meta_p} missing; cannot verify cache matches run config.", flush=True)
+        return
+    meta = json.load(open(meta_p))
+    ck = os.path.basename(args.wilddet3d_ckpt)
+    mism = []
+    if meta.get("fpn_level") != args.fpn_level:
+        mism.append(f"fpn_level {meta.get('fpn_level')} != {args.fpn_level}")
+    if meta.get("size") != args.size:
+        mism.append(f"size {meta.get('size')} != {args.size}")
+    if meta.get("ckpt") != ck:
+        mism.append(f"ckpt {meta.get('ckpt')} != {ck}")
+    if mism:
+        raise SystemExit(f"feat-cache mismatch: {'; '.join(mism)}. Re-run precompute_feat_cache.py.")
+    print(f"[feat-cache] validated {cache_dir} (fpn{args.fpn_level}, {args.size}px, shape {meta.get('shape')})", flush=True)
+
+
 @torch.no_grad()
 def validate(model, stage2, loader, size, device, amp, mode="gt",
              score_thresh=0.3, match_thresh=0.15, n_samples=2048) -> dict:
@@ -131,7 +160,8 @@ def validate(model, stage2, loader, size, device, amp, mode="gt",
     for batch in loader:
         batch = move(batch, device)
         with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-            pred = model(batch["image"], batch["depth"], batch["K"], return_feat=True)
+            pred = model(batch["image"], batch["depth"], batch["K"], return_feat=True,
+                         rgb_fpn=batch.get("rgb_fpn"))
         feat, stride = pred["feat"].float(), pred["stride"]
         if mode == "predicted":
             dense = {"heatmap": pred["heatmap"].float(), "reg": pred["reg"].float()}
@@ -195,6 +225,10 @@ def main() -> None:
                     help="Stage-1 heatmap score threshold for predicted-mode queries")
     ap.add_argument("--match-thresh", type=float, default=0.15,
                     help="max center distance (m) to match a predicted box to a GT box")
+    ap.add_argument("--feat-cache-dir", default=None,
+                    help="dir of precomputed SAM3 RGB FPN features "
+                         "(scripts/precompute_feat_cache.py); skips the frozen SAM3 forward "
+                         "for ~1.6x faster steps. Requires the RGB backbone frozen (--encoder-lr 0).")
     ap.add_argument("--resume", default=None, help="checkpoint to resume model+stage2 from")
     ap.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--out", default="ckpt/jenga")
@@ -206,10 +240,15 @@ def main() -> None:
     ap.add_argument("--wandb-run-name", default=os.environ.get("WD3D_RUN_NAME", "jenga-2stage"))
     args = ap.parse_args()
 
+    if args.feat_cache_dir:
+        validate_feat_cache(args.feat_cache_dir, args)
+
     tr_ds = SimJengaDataset(args.sim_root, args.size, args.max_scenes,
-                            split="train", val_frac=args.val_frac)
+                            split="train", val_frac=args.val_frac,
+                            feat_cache_dir=args.feat_cache_dir)
     va_ds = SimJengaDataset(args.sim_root, args.size, args.max_scenes,
-                            split="val", val_frac=args.val_frac)
+                            split="val", val_frac=args.val_frac,
+                            feat_cache_dir=args.feat_cache_dir)
     print(f"sim samples (views): train={len(tr_ds)} val={len(va_ds)}", flush=True)
     tr_loader = DataLoader(tr_ds, batch_size=args.batch_size, shuffle=True,
                            num_workers=args.workers, collate_fn=jenga_collate,
@@ -291,7 +330,8 @@ def main() -> None:
             batch = move(batch, args.device)
             opt.zero_grad()
             with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=args.amp):
-                pred = model(batch["image"], batch["depth"], batch["K"], return_feat=True)
+                pred = model(batch["image"], batch["depth"], batch["K"], return_feat=True,
+                             rgb_fpn=batch.get("rgb_fpn"))
             feat, stride = pred["feat"].float(), pred["stride"]
             dense = {"heatmap": pred["heatmap"].float(), "reg": pred["reg"].float()}
             _, _, hf, wf = dense["heatmap"].shape

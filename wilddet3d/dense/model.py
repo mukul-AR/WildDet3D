@@ -103,17 +103,34 @@ class DenseDet3D(nn.Module):
         images_01 = images * self._imagenet_std + self._imagenet_mean
         return (images_01 - 0.5) / 0.5
 
-    def _fused_feats(self, images: Tensor, depth: Tensor, k: Tensor) -> list[Tensor]:
-        """Encoders + depth fusion -> list of fused FPN levels.
+    def _fused_feats(
+        self, images: Tensor, depth: Tensor, k: Tensor, rgb_fpn: Tensor | None = None
+    ) -> Tensor:
+        """Encoders + depth fusion -> the single fused FPN level the head reads.
 
-        Encoder forward runs under ``no_grad`` when frozen; under grad when
-        ``train_encoders`` is set (low-LR fine-tune).
+        SAM3 forward runs under ``no_grad`` when frozen; under grad when
+        ``train_encoders`` is set. Fusion is per-level independent and the head
+        consumes only ``self.fpn_level``, so we fuse just that level.
+
+        When ``rgb_fpn`` is given (a precomputed SAM3 FPN tensor ``[B,C,Hf,Wf]``
+        for ``self.fpn_level``), the frozen SAM3 forward is skipped entirely and
+        the cached feature is fused with the (always recomputed) depth latents.
+        Valid only while the RGB backbone stays frozen — its output is then a
+        deterministic function of the input image. See
+        ``scripts/precompute_feat_cache.py``.
         """
         _, _, h, w = images.shape
-        sam_ctx = contextlib.nullcontext() if self.train_encoders else torch.no_grad()
+        if rgb_fpn is None:
+            sam_ctx = contextlib.nullcontext() if self.train_encoders else torch.no_grad()
+            with sam_ctx:
+                backbone_out = self.backbone.forward_image(self._to_sam3(images))
+            backbone_fpn = backbone_out["backbone_fpn"]
+            if not isinstance(backbone_fpn, list):
+                backbone_fpn = [backbone_fpn]
+            visual = [backbone_fpn[self.fpn_level]]
+        else:
+            visual = [rgb_fpn]
         dep_ctx = contextlib.nullcontext() if self.train_depth_encoder else torch.no_grad()
-        with sam_ctx:
-            backbone_out = self.backbone.forward_image(self._to_sam3(images))
         with dep_ctx:
             geom = self.geometry_backend(
                 images=images,
@@ -126,26 +143,30 @@ class DenseDet3D(nn.Module):
             )
         depth_latents = geom["depth_latents"]
         depth_latents_hw = geom.get("aux", {}).get("depth_latents_hw")
-        backbone_fpn = backbone_out["backbone_fpn"]
-        if not isinstance(backbone_fpn, list):
-            backbone_fpn = [backbone_fpn]
 
         fused = self.early_depth_fusion(
-            visual_feats=backbone_fpn,
+            visual_feats=visual,
             depth_latents=depth_latents,
             depth_latents_hw=depth_latents_hw,
         )
         if not isinstance(fused, (list, tuple)):
             fused = [fused]
-        return list(fused)
+        return fused[0]
 
     def forward(
-        self, images: Tensor, depth: Tensor, k: Tensor, return_feat: bool = False
+        self,
+        images: Tensor,
+        depth: Tensor,
+        k: Tensor,
+        return_feat: bool = False,
+        rgb_fpn: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """Args: images ``[B,3,H,W]`` (ImageNet-norm), depth ``[B,1,H,W]`` (m),
-        k ``[B,3,3]``. Returns dense ``heatmap`` + ``reg`` maps; when
-        ``return_feat`` also the fused ``feat`` ``[B,C,Hf,Wf]`` + ``stride``."""
-        feat = self._fused_feats(images, depth, k)[self.fpn_level]
+        k ``[B,3,3]``. ``rgb_fpn`` optionally supplies the precomputed SAM3 FPN
+        level (skips the frozen RGB forward). Returns dense ``heatmap`` + ``reg``
+        maps; when ``return_feat`` also the fused ``feat`` ``[B,C,Hf,Wf]`` +
+        ``stride``."""
+        feat = self._fused_feats(images, depth, k, rgb_fpn=rgb_fpn)
         out = self.head(feat)
         if return_feat:
             out["feat"] = feat

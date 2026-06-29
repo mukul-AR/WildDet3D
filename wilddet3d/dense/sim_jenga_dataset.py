@@ -68,11 +68,16 @@ class SimJengaDataset(Dataset):
         min_visible: float = 0.05,
         split: str = "train",
         val_frac: float = 0.1,
+        feat_cache_dir: str | None = None,
     ) -> None:
         super().__init__()
         assert split in ("train", "val")
         self.size = size
         self.min_visible = min_visible
+        # dir of precomputed SAM3 RGB FPN features (one .npy per view, keyed by
+        # md5 of the abspath). When set, __getitem__ attaches "rgb_fpn" so the
+        # trainer can skip the frozen SAM3 forward. See precompute_feat_cache.py.
+        self.feat_cache_dir = feat_cache_dir
         scene_dirs = sorted(glob.glob(os.path.join(sim_root, "synth_*")))
         if max_scenes > 0:
             scene_dirs = scene_dirs[:max_scenes]
@@ -173,7 +178,7 @@ class SimJengaDataset(Dataset):
         def t(x, d):
             return torch.tensor(x, dtype=torch.float32).reshape(n, d)
 
-        return {
+        out = {
             "image": img,
             "depth": depth_m,
             "K": torch.from_numpy(k_adj),
@@ -188,6 +193,15 @@ class SimJengaDataset(Dataset):
             "assign": torch.tensor(assign, dtype=torch.long),
             "vis_frac": torch.tensor(vis_frac, dtype=torch.float32).reshape(n),
         }
+        if self.feat_cache_dir is not None:
+            fp = feat_cache_path(self.feat_cache_dir, cam)
+            if not os.path.exists(fp):
+                raise FileNotFoundError(
+                    f"feat cache miss for {cam} ({fp}). Run "
+                    f"scripts/precompute_feat_cache.py --cache-dir {self.feat_cache_dir} first."
+                )
+            out["rgb_fpn"] = torch.from_numpy(np.load(fp))  # [C,Hf,Wf] fp16
+        return out
 
 
 def jenga_collate(batch: list[dict]) -> dict:
@@ -209,6 +223,8 @@ def jenga_collate(batch: list[dict]) -> dict:
         "depth": torch.stack([b["depth"] for b in batch]),
         "K": torch.stack([b["K"] for b in batch]),
     }
+    if "rgb_fpn" in batch[0]:
+        out["rgb_fpn"] = torch.stack([b["rgb_fpn"] for b in batch])
     for k in keys_list:
         out[k] = [b[k] for b in batch]
     return out
