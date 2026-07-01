@@ -57,6 +57,8 @@ def main() -> None:
     ap.add_argument("--score-thresh", type=float, default=0.3)
     ap.add_argument("--match-thresh", type=float, default=0.30, help="GT<->pred center match (m)")
     ap.add_argument("--n-samples", type=int, default=4096)
+    ap.add_argument("--posthoc-anchor", action="store_true",
+                    help="replace Stage-2 learned center with geometric near-face anchor")
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -85,6 +87,10 @@ def main() -> None:
 
     # accumulate per-GT records (matched to nearest predicted actual box)
     iou_l, ctr_l, sz_l, rot_l, vf_l = [], [], [], [], []
+    # Stage attribution: for the SAME matched prediction, its *visible*-box
+    # center error (Stage-1 localization) vs its *actual*-box center error
+    # (Stage-2 placement). Splits where the residual center error originates.
+    vctr_l = []
     n_gt = 0
     n_pred = 0
     prec_hit = 0
@@ -95,10 +101,12 @@ def main() -> None:
         feat, stride = pred["feat"].float(), pred["stride"]
         dets = decode_dense(pred["heatmap"].float(), pred["reg"].float(),
                             batch["K"], stride, score_thresh=args.score_thresh)
-        res = decode_jenga(dets, feat, stride, stage2, batch["catalog"], batch["K"])
+        res = decode_jenga(dets, feat, stride, stage2, batch["catalog"], batch["K"],
+                           posthoc_anchor=args.posthoc_anchor)
         for i in range(len(batch["act_center"])):
             gc = batch["act_center"][i].float()
             gs = batch["act_size"][i].float()
+            gvc = batch["vis_center"][i].float()  # GT *visible*-box center
             from wilddet3d.dense.rotation_utils import rotation_6d_to_matrix
             gr = rotation_6d_to_matrix(batch["act_rot6d"][i].float())
             vf = batch["vis_frac"][i].float()
@@ -112,10 +120,13 @@ def main() -> None:
             if m == 0:
                 iou_l.append(torch.zeros(ng)); ctr_l.append(torch.full((ng,), 9.9))
                 sz_l.append(torch.full((ng,), 9.9)); rot_l.append(torch.full((ng,), 99.0))
-                vf_l.append(vf.cpu())
+                vf_l.append(vf.cpu()); vctr_l.append(torch.full((ng,), 9.9))
                 continue
             d = torch.cdist(gc, pc)            # [N, M] GT->pred center dist
             nn = d.argmin(dim=1); nnd = d.min(dim=1).values
+            # same matched prediction's visible center vs GT visible center (Stage-1)
+            pvc = dets[i]["center"]            # [M,3] Stage-1 visible centers
+            vctr_l.append((pvc[nn] - gvc).norm(dim=-1).cpu())
             mp_c, mp_s, mp_r = pc[nn], ps[nn], pr[nn]   # nearest pred per GT
             iou = iou3d_mc(mp_c, mp_s, mp_r, gc, gs, gr, args.n_samples)
             iou = torch.where(nnd < args.match_thresh, iou, torch.zeros_like(iou))
@@ -130,7 +141,7 @@ def main() -> None:
             prec_hit += int((pio >= 0.5).sum())
 
     iou = torch.cat(iou_l); ctr = torch.cat(ctr_l); sz = torch.cat(sz_l)
-    rot = torch.cat(rot_l); vf = torch.cat(vf_l)
+    rot = torch.cat(rot_l); vf = torch.cat(vf_l); vctr = torch.cat(vctr_l)
     print("\n============== JENGA end-to-end eval (Stage 1 -> Stage 2) ==============")
     print(f"  GT boxes: {n_gt}  |  predicted boxes: {n_pred}")
     print(f"  mean per-GT 3D IoU   : {iou.mean():.4f}")
@@ -144,6 +155,17 @@ def main() -> None:
         if int(m.sum()):
             print(f"    {name:<22}{int(m.sum()):>7}{iou[m].mean():>10.3f}"
                   f"{(iou[m]>=0.5).float().mean():>11.3f}{(iou[m]>=0.75).float().mean():>12.3f}")
+    print("\n  --- STAGE ATTRIBUTION (center error on detection-matched boxes) ---")
+    print("    Where does the center error originate? S1 = visible-box center"
+          " (localization); S2 = actual-box center (placement).")
+    print(f"    {'subset':<22}{'n':>7}{'S1 visible-ctr':>17}{'S2 actual-ctr':>16}")
+    det = ctr < args.match_thresh
+    for thr, name in [(0.0, "all boxes"), (0.6, "graspable (vf>=.6)"), (0.9, "front (vf>=.9)")]:
+        mm = (vf >= thr) & det
+        if int(mm.sum()):
+            print(f"    {name:<22}{int(mm.sum()):>7}{vctr[mm].mean()*100:>15.2f}cm"
+                  f"{ctr[mm].mean()*100:>14.2f}cm")
+
     print("\n  --- TAIL DIAGNOSTIC ---")
     print("  mean IoU by visible_fraction:")
     for lo, hi in [(0.0, 0.3), (0.3, 0.6), (0.6, 0.9), (0.9, 1.01)]:

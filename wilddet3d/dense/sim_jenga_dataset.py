@@ -98,10 +98,18 @@ class SimJengaDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         cam, scene_json = self.samples[idx]
-        rgb = cv2.cvtColor(
-            cv2.imread(os.path.join(cam, "rgb.png"), cv2.IMREAD_COLOR),
-            cv2.COLOR_BGR2RGB,
-        )
+        rgb_bgr = cv2.imread(os.path.join(cam, "rgb.png"), cv2.IMREAD_COLOR)
+        if rgb_bgr is None:
+            # Corrupt/unreadable rgb.png (e.g. truncated or bad PNG stream):
+            # skip forward to the next readable sample so one bad file can't
+            # kill a multi-day run. cv2.imread returns None on such files.
+            print(f"[dataset] WARN unreadable {cam}/rgb.png -> skipping", flush=True)
+            for off in range(1, len(self.samples)):
+                cam, scene_json = self.samples[(idx + off) % len(self.samples)]
+                rgb_bgr = cv2.imread(os.path.join(cam, "rgb.png"), cv2.IMREAD_COLOR)
+                if rgb_bgr is not None:
+                    break
+        rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
         depth = cv2.imread(os.path.join(cam, "depth.png"), cv2.IMREAD_UNCHANGED)
         if depth is None:
             depth = np.zeros(rgb.shape[:2], dtype=np.uint16)

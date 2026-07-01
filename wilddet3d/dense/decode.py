@@ -66,13 +66,23 @@ def decode_dense(
 
 
 @torch.no_grad()
-def decode_jenga(stage1_dets, feat, stride, stage2, catalog, k):
+def decode_jenga(stage1_dets, feat, stride, stage2, catalog, k, posthoc_anchor=False):
     """Chain Stage-1 visible dets -> Stage-2 actual boxes.
 
     The actual box **inherits the visible box's rotation** (verified identical in
     the data); Stage 2 only selects the SKU and places the center. The selected
     SKU's sorted dims are laid onto the box axes by the visible per-axis extent
     order (smallest dim -> axis with smallest visible extent).
+
+    If ``posthoc_anchor`` is set, the actual-box center is **not** taken from the
+    Stage-2 ``center_delta``; instead the actual box is anchored so its
+    camera-facing (near) face coincides with the visible box's near face, then
+    grown away from the camera by the (catalog) actual depth. This is a pure
+    geometric correction that tests whether the occluded-tail center error is
+    just "center placed too shallow" (model fails to push back by the known SKU
+    depth). The shift per local axis j is ``0.5*(actual-visible extent)`` toward
+    +Z (away from camera, sign of ``R[2,j]``); only the occluded (depth) axis
+    has a meaningful extent gap, so the box grows along the viewing ray.
 
     Args:
         stage1_dets: per-image dicts from :func:`decode_dense`
@@ -116,8 +126,18 @@ def decode_jenga(stage1_dets, feat, stride, stage2, catalog, k):
         # dim->axis assignment), then snap to the catalog values for valid dims
         order = res["log_size"][0, :n].argsort(dim=-1)  # axes ascending by predicted extent
         size = torch.zeros_like(sku).scatter_(1, order, sku)  # per-axis dims
-        center = c + res["center_delta"][0, :n]
         R = det["R"]  # rotation inherited from the visible box
+        if posthoc_anchor:
+            # Domain-invariant center: anchor the actual box's near (camera-facing)
+            # face to the visible box's near face, then grow away from the camera
+            # by the actual (catalog) depth. Replaces the *learned* center_delta
+            # (which doesn't transfer sim->real) with pure geometry.
+            away = torch.sign(R[:, 2, :])  # [n,3] which way each axis points in +Z (away from cam)
+            away = torch.where(away == 0, torch.ones_like(away), away)
+            delta_local = 0.5 * (size - det["size"]) * away  # grow away by half the extent gap
+            center = c + torch.einsum("nij,nj->ni", R, delta_local)
+        else:
+            center = c + res["center_delta"][0, :n]
         out.append(
             {
                 "center": center,
