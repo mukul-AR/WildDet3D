@@ -188,7 +188,8 @@ metadata.json: intrinsics, camera_extrinsic_4x4 (cam->world),
 | **testing-5** | corrected + learned per-axis + ADD loss | fixed 4k | **0.893** (TF) | teacher-forced; size_err 11.3→1.5 cm, ADD 1.9 cm |
 | **real-train-1** | + **predicted boxes** (no teacher forcing) + bigger Stage-1 (78M) | **13.2k** | **0.893** (E2E graspable) | ✅ **current best** — train/test gap closed; 20 ep (5 GT-warmup → 15 predicted) |
 | real-train-2 | finer FPN (`fpn-0`, 288²) + head 384/4 + vis-weight 0.6 | 13.2k | 0.828 (E2E graspable) | ❌ **killed @ e18** — finer grid worse on every metric + over-predicting; dead end (see diagnostic) |
-| **depth-unfreeze-1** | r1 config + **LingBot-depth last-4-block unfreeze @ 1e-6** | 13.2k | *running* | testing depth-axis center precision; 25 ep → `ckpt/real3`, W&B `depth-unfreeze-1` |
+| **depth-unfreeze-1** | r1 config + LingBot-depth last-4-block unfreeze @ 1e-6 | 13.2k | **0.880** (E2E graspable) | ❌ **regressed** vs r1's 0.893 (worse S1 1.60 / S2 1.86 cm center too). In-train val was **misleading** — showed 0.890 > r1 0.878, the *opposite* of the authoritative e2e. batch-8 confound. `ckpt/real3` |
+| **visweight46k-1** | r1 config + **vis-weight 0.6** (down-weight occluded Stage-2 loss) | **46k** | *running* | focus capacity on graspable boxes; 20 ep, batch 24, no cache → `ckpt/visweight46k1` |
 
 **`real-train-1` end-to-end eval (recall-inclusive, `jenga_eval_e2e.py`):**
 | subset | mean IoU | recall@.5 | recall@.75 |
@@ -257,25 +258,46 @@ ssh ubuntu@209.20.157.13          # key-based, 1× H100 80GB
 
 ## 9. Next steps
 
-1. **`depth-unfreeze-1` (running) — depth-axis center precision.** r1 config +
-   partial LingBot-depth unfreeze (last 4/24 blocks @ 1e-6), 25 ep → `ckpt/real3`.
-   Hypothesis: adapting the depth features cuts the range-dependent **depth-axis**
-   center variance (§6) below r1's 1.7 cm floor. Watch epochs 16–25. **No
-   auto-eval queued** behind it — add an `evalreal3` waiter if wanted. GPU headroom
-   is large (batch 8 = 18/80 GB) → the next iteration can afford batch 16 and/or
-   more unfrozen blocks if this responds — and should add **`--feat-cache-dir`**
-   (~1.66×/step; §4) once `depth-unfreeze-1` frees the GPU for the ~1 h precompute.
-2. **Tabled levers** (in order): raw metric-depth skip into the center head;
-   `w_add=0` (ADD-S cleanup); multi-view fusion (partial — 54% single-camera).
-3. **Sim→real / ZED:** depth-realism augmentation; a real-data validation track is
-   the biggest unmeasured risk (everything so far is clean-depth sim).
-4. **NOT yet: SAM3 (RGB) fine-tune** — premature on sim RGB.
-5. **Real `vis4d_cuda_ops`** on the H100 (Hopper) for exact 3D-IoU (currently MC);
-   per-camera viz filter; export more scenes' preds; DDP for multi-GPU.
+1. **`visweight46k-1` (RUNNING, ~3 days) — focus Stage-2 on graspable boxes.** r1
+   config + `--vis-weight-thresh 0.6` (weight each Stage-2 box by
+   `clamp(vis_frac/0.6, 0.1, 1)`: full credit for graspable vf≥.6, tapering to a 0.1
+   floor for occluded), on the **46k** set (local `/home/ubuntu/sim_46335`), batch 24,
+   20 ep, **no cache** → `ckpt/visweight46k1`. Remote tmux `evalvisw46k` auto-runs the
+   e2e eval on exit. Caveat: 46k + vis-weight changes two things vs r1 → a "best next
+   model," not a clean ablation of the weighting alone.
+2. **THE real lever = the sim→real APPEARANCE gap (confirmed NOT calibration).** On a
+   real capture (`data/place_*`; GT in `boxes_yaml_string`; `jenga_infer_real.py`):
+   sim↔real intrinsics are **byte-identical** (the sim is calibrated to the real pole
+   rig — same fx/fy/FOV/camera positions), yet on real the model gives **rotation 9°
+   (sim 0.3°), center 17 cm, depth-shallow −5.8 cm**. Geometry is perfect → the gap is
+   pure **appearance** (real RGB + real-estimated depth ≠ sim-rendered clean RGB/depth).
+   More sim data won't fix it (46k = same occlusion mix as 13.2k, only +2× SKU variety).
+   Levers: (a) real-data fine-tune (needs more labeled `place_*` captures); (b) **RGB +
+   depth domain randomization / augmentation** in sim — the dataset currently does
+   **ZERO augmentation**, so large headroom. *Rejected:* train on LingBot-sim-depth
+   (not what the deployment camera outputs).
+3. **Geometric near-face anchor** (`--posthoc-anchor`, eval + infer): replaces the
+   learned center_delta with "anchor the actual box's camera-facing face to the visible
+   box's near face, grow back by the SKU depth." Domain-invariant → on real it **halves
+   the depth shallow-bias** (−5.8→−2.8 cm); on sim it **regresses graspable 0.893→0.861**
+   (neutral on front vf≥.9, breaks under mutual occlusion). Optional high-vis/real
+   inference toggle, not a default (refined depth already made real depth error minor).
+4. **Tabled levers:** `w_add=0` (ADD-S cleanup); multi-view fusion (partial — 54% of
+   graspable boxes are single-camera). NOT yet: SAM3 (RGB) fine-tune (premature on sim RGB).
+5. **Infra:** real `vis4d_cuda_ops` on the H100 (Hopper) for exact 3D-IoU (currently MC);
+   per-camera viz filter; DDP. Big-dataset I/O: **stage to local NVMe** (46k enumerates in
+   2.3 s local vs minutes on NFS); the RGB feature cache is **not** worth it for large
+   sets — a cached feat (10.6 MB) is 8× a raw image, so on NFS it's *more* I/O to save
+   idle compute; only `data_combined` (RAM-cached, local) is a case where it helps.
 
 ### Confirmed dead ends (don't re-run)
 - **Finer FPN grid** (`--fpn-level 0`, real-train-2): E2E graspable 0.893 → **0.828**.
 - **Size-aware symmetry loss** (testing-3): IoU 0.81 → 0.74.
+- **Depth-encoder unfreeze** (`depth-unfreeze-1`, last-4 blocks @ 1e-6, batch 8): E2E
+  graspable 0.893 → **0.880** (+ worse S1/S2 center). ⚠️ in-train val showed the
+  *opposite* — **always confirm with `jenga_eval_e2e.py`, not the training val print**.
+- **Geometric center anchor on sim** (`--posthoc-anchor`): graspable 0.893 → **0.861**
+  (it helps only the *real* depth-bias; see §9.3).
 
 ### Tooling added (this session)
 - `scripts/jenga_eval_e2e.py` — end-to-end eval: recall@IoU + **visibility-
@@ -287,5 +309,14 @@ ssh ubuntu@209.20.157.13          # key-based, 1× H100 80GB
 - `scripts/precompute_feat_cache.py` + `--feat-cache-dir` — cache the frozen SAM3
   RGB FPN to skip its forward (~1.66×/step; opt-in, manifest-validated, verified
   prediction-identical). See §4. Recipe: precompute once, then add the one flag.
+  ⚠️ Only worth it for small **local, RAM-cached** sets (`data_combined`); for large
+  sets the ~1.5 TB cache doesn't fit locally and on NFS it's *more* I/O than raw images.
+- `scripts/jenga_infer_real.py` — **real-capture** inference (ROS `camera_info` +
+  quaternion extrinsics, `image.jpg`, `refined_depth.png`): GT/S1/S2 HTML overlays +
+  center / **signed-depth** / **symmetry-aware rotation** error vs GT + `--posthoc-anchor`.
+- `scripts/jenga_pcd_viz_real.py` — 3D colored point-cloud viewer (base_link, multi-cam).
+- `--posthoc-anchor` (`decode_jenga` / eval / infer) — geometric near-face center anchor (§9.3).
+- **Loader resilience**: `SimJengaDataset.__getitem__` skips corrupt/unreadable
+  `rgb.png` (cv2→None → advance to next sample) so one bad file can't kill a long run.
 
 (Checkpoints, `.venv/`, `pretrained/`, `data/`, `wandb/`, `viz_out/` are git-ignored.)
