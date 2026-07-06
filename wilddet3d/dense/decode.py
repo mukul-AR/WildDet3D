@@ -16,6 +16,42 @@ def _nms_peaks(heat: Tensor, kernel: int = 3) -> Tensor:
     return heat * (hmax == heat).float()
 
 
+def visible_near_face(center: Tensor, size: Tensor, R: Tensor) -> Tensor:
+    """Camera-frame near-face center of a box.
+
+    Shifts the box center toward the camera (origin) by half the extent along
+    the box's **depth axis** (the local axis most aligned with the viewing ray).
+
+    Visible and actual boxes share this near-face **plane** exactly (0 mm,
+    verified dataset-wide), so it is the convention-invariant anchor for placing
+    the actual box. The visible depth extent is a 0.5 m *placeholder* whenever
+    the depth dimension is unobserved (~48% of boxes), which makes the visible
+    *center* bimodal along the ray — but the near face stays pinned to the
+    physical front surface, so ``center - half_depth`` recovers the shared plane
+    regardless of the placeholder.
+
+    Args:
+        center: ``[N,3]`` camera-frame box centers.
+        size:   ``[N,3]`` per-axis extents (same axis order as ``R`` columns).
+        R:      ``[N,3,3]`` rotations (columns = box axes in the camera frame).
+
+    Returns:
+        ``[N,3]`` near-face centers (camera frame).
+    """
+    if center.shape[0] == 0:
+        return center
+    ray = center / center.norm(dim=-1, keepdim=True).clamp_min(1e-6)  # [N,3]
+    align = (R * ray[:, :, None]).sum(dim=1).abs()  # |axis_j . ray| -> [N,3]
+    idx = torch.arange(R.shape[0], device=R.device)
+    d = align.argmax(dim=-1)  # [N] depth-axis index
+    axis = R[idx, :, d]  # [N,3] depth-axis vector
+    half = size[idx, d] * 0.5  # [N]
+    plus = center + axis * half[:, None]
+    minus = center - axis * half[:, None]
+    take_plus = plus.norm(dim=-1) < minus.norm(dim=-1)  # closer to camera (origin)
+    return torch.where(take_plus[:, None], plus, minus)
+
+
 @torch.no_grad()
 def decode_dense(
     heatmap: Tensor,
@@ -74,8 +110,14 @@ def decode_jenga(stage1_dets, feat, stride, stage2, catalog, k, posthoc_anchor=F
     SKU's sorted dims are laid onto the box axes by the visible per-axis extent
     order (smallest dim -> axis with smallest visible extent).
 
+    Center placement (default): the actual center is the visible box's near-face
+    center (the shared front-face plane) plus a learned box-local offset
+    (``face_delta``). This anchors on the convention-invariant near face rather
+    than the bimodal visible center (48% of visible depths are a 0.5 m
+    placeholder), so the learned offset target is unimodal.
+
     If ``posthoc_anchor`` is set, the actual-box center is **not** taken from the
-    Stage-2 ``center_delta``; instead the actual box is anchored so its
+    Stage-2 ``face_delta``; instead the actual box is anchored so its
     camera-facing (near) face coincides with the visible box's near face, then
     grown away from the camera by the (catalog) actual depth. This is a pure
     geometric correction that tests whether the occluded-tail center error is
@@ -137,7 +179,11 @@ def decode_jenga(stage1_dets, feat, stride, stage2, catalog, k, posthoc_anchor=F
             delta_local = 0.5 * (size - det["size"]) * away  # grow away by half the extent gap
             center = c + torch.einsum("nij,nj->ni", R, delta_local)
         else:
-            center = c + res["center_delta"][0, :n]
+            # Actual center = visible near-face (shared front-face plane) +
+            # a learned box-local offset. Anchoring on the near face removes the
+            # bimodal-placeholder dependence of the old visible-center residual.
+            nf = visible_near_face(c, det["size"], R)
+            center = nf + torch.einsum("nij,nj->ni", R, res["face_delta"][0, :n])
         out.append(
             {
                 "center": center,

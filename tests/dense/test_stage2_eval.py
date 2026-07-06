@@ -1,6 +1,8 @@
 import torch
 
+from wilddet3d.dense.decode import visible_near_face
 from wilddet3d.dense.metrics import stage2_eval_arrays, summarize_eval
+from wilddet3d.dense.rotation_utils import rotation_6d_to_matrix
 
 
 def test_perfect_prediction_scores_iou_one():
@@ -16,9 +18,14 @@ def test_perfect_prediction_scores_iou_one():
     logits = torch.full((1, 2, 3), -10.0)
     logits[0, 0, 0] = 10.0  # argmax -> 0
     logits[0, 1, 1] = 10.0  # argmax -> 1
+    # perfect face_delta: R^T (act_center - near_face), so the near-face-anchored
+    # reconstruction (nf + R @ face_delta) returns act_center exactly.
+    R = rotation_6d_to_matrix(ident6)
+    nf = visible_near_face(vis_center, vis_size, R)
+    face_delta = torch.einsum("nji,nj->ni", R, act_center - nf)  # R^T @ (dc)
     out = {
         "assign_logits": logits,
-        "center_delta": (act_center - vis_center)[None],  # [1,2,3]
+        "face_delta": face_delta[None],  # [1,2,3]
         "log_size": act_size.log()[None],  # predicted per-axis order == GT
         "q_mask": torch.ones(1, 2, dtype=torch.bool),
     }

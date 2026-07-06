@@ -12,6 +12,7 @@ import itertools
 import torch
 from torch import Tensor
 
+from wilddet3d.dense.decode import visible_near_face
 from wilddet3d.dense.rotation_utils import rotation_6d_to_matrix
 
 _UNIT_SIGNS = torch.tensor(
@@ -104,8 +105,14 @@ def stage2_eval_arrays(out: dict, batch: dict, n_samples: int = 4096) -> dict:
         sku = cat[assign]  # [n, 3] ascending
         order = out["log_size"][i, :n].float().argsort(dim=-1)  # predicted per-axis order
         size_pred = torch.zeros_like(sku).scatter_(1, order, sku)  # per-axis
-        center_pred = out["center_delta"][i, :n].float() + batch["vis_center"][i].to(device).float()
         r_pred = rotation_6d_to_matrix(batch["vis_rot6d"][i].to(device).float())  # inherited
+        nf = visible_near_face(
+            batch["vis_center"][i].to(device).float(),
+            batch["vis_size"][i].to(device).float(), r_pred,
+        )  # shared front-face plane anchor
+        center_pred = nf + torch.einsum(
+            "nij,nj->ni", r_pred, out["face_delta"][i, :n].float()
+        )
         pc.append(center_pred)
         ps.append(size_pred)
         pr.append(r_pred)

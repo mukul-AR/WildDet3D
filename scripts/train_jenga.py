@@ -85,7 +85,7 @@ def make_predicted_queries(dense, batch, stride, score_thresh, match_thresh):
     dets = decode_dense(dense["heatmap"], dense["reg"], batch["K"], stride,
                         score_thresh=score_thresh)
     queries_uv, vis_obb = [], []
-    keys = ("vis_center", "vis_rot6d", "act_center", "act_size", "act_rot6d", "assign", "vis_frac")
+    keys = ("vis_center", "vis_size", "vis_rot6d", "act_center", "act_size", "act_rot6d", "assign", "vis_frac")
     mb = {k: [] for k in keys}
     for i, det in enumerate(dets):
         pc, ps, pr = det["center"], det["size"], det["R"]
@@ -94,6 +94,7 @@ def make_predicted_queries(dense, batch, stride, score_thresh, match_thresh):
             queries_uv.append(pc.new_zeros(0, 2))
             vis_obb.append(pc.new_zeros(0, 12))
             mb["vis_center"].append(pc.new_zeros(0, 3))
+            mb["vis_size"].append(pc.new_zeros(0, 3))
             mb["vis_rot6d"].append(pc.new_zeros(0, 6))
             mb["act_center"].append(pc.new_zeros(0, 3))
             mb["act_size"].append(pc.new_zeros(0, 3))
@@ -106,6 +107,7 @@ def make_predicted_queries(dense, batch, stride, score_thresh, match_thresh):
         queries_uv.append(project_to_grid(pc, batch["K"][i], stride))
         vis_obb.append(torch.cat([pc, ps, pr6], dim=-1))
         mb["vis_center"].append(pc)
+        mb["vis_size"].append(ps)
         mb["vis_rot6d"].append(pr6)
         mb["act_center"].append(batch["act_center"][i][gi])
         mb["act_size"].append(batch["act_size"][i][gi])

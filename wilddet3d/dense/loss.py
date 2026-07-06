@@ -6,6 +6,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+from wilddet3d.dense.decode import visible_near_face
 from wilddet3d.dense.metrics import corner_distance
 from wilddet3d.dense.rotation_utils import (
     rad2deg,
@@ -149,7 +150,7 @@ class JengaStage2Loss(nn.Module):
 
     def forward(self, out: dict, batch: dict) -> dict:
         device = out["assign_logits"].device
-        logits, dc, lsz = out["assign_logits"], out["center_delta"], out["log_size"]
+        logits, dc, lsz = out["assign_logits"], out["face_delta"], out["log_size"]
         b = logits.shape[0]
         pa, pc, psz, pr, ta, tc, tsz, gr, vf = [], [], [], [], [], [], [], [], []
         has_vf = "vis_frac" in batch
@@ -158,7 +159,11 @@ class JengaStage2Loss(nn.Module):
             if n == 0:
                 continue
             pa.append(logits[i, :n])  # [n, K]
-            pc.append(dc[i, :n] + batch["vis_center"][i].to(device))
+            # actual center = visible near-face (shared plane) + local offset
+            vis_c_i = batch["vis_center"][i].to(device)
+            R_i = rotation_6d_to_matrix(batch["vis_rot6d"][i].to(device))  # [n,3,3]
+            nf_i = visible_near_face(vis_c_i, batch["vis_size"][i].to(device), R_i)
+            pc.append(nf_i + torch.einsum("nij,nj->ni", R_i, dc[i, :n]))
             psz.append(lsz[i, :n].exp())  # per-axis extents (m)
             pr.append(batch["vis_rot6d"][i].to(device))  # inherited rotation
             ta.append(batch["assign"][i].to(device))

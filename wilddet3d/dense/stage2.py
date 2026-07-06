@@ -80,9 +80,10 @@ class JengaStage2(nn.Module):
         self.q_to_assign = nn.Linear(d_model, d_model)
         self.k_to_assign = nn.Linear(d_model, d_model)
         # Rotation is inherited from the visible box (not predicted). The head
-        # places the actual center (3) and the per-axis log-extents (3) along the
-        # inherited axes — the per-axis extents *are* the learned dim->axis
-        # assignment (which axis is the long/short/depth one).
+        # emits a box-local center offset (3) from the visible near-face (the
+        # shared front-face plane; see decode.visible_near_face) and the per-axis
+        # log-extents (3) along the inherited axes — the per-axis extents *are*
+        # the learned dim->axis assignment (which axis is long/short/depth).
         self.pose_head = nn.Sequential(
             nn.Linear(d_model, d_model), nn.GELU(), nn.Linear(d_model, 6)
         )
@@ -133,7 +134,7 @@ class JengaStage2(nn.Module):
         pose = self.pose_head(q)
         return {
             "assign_logits": logits,
-            "center_delta": pose[..., :3],
+            "face_delta": pose[..., :3],
             "log_size": pose[..., 3:],
             "q_mask": q_mask,
             "k_mask": k_mask,

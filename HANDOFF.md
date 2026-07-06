@@ -26,11 +26,18 @@
   in unloading, heavily-occluded boxes are picked later (once un-occluded), so
   their IoU isn't actionable now (we still emit them for collision safety).
 - **Gate:** 3D IoU ≥ 0.95 (on graspable boxes), rotation < 5° median.
-- **Status (2026-06-29):** `real-train-2` (finer FPN grid) was a **dead end** —
-  killed at epoch 18, E2E graspable **0.828** (worse than r1 across the board; §6).
-  Active run: **`depth-unfreeze-1`** — r1 config + partial **LingBot-depth encoder
-  unfreeze** (last 4/24 blocks @ 1e-6), 25 ep → `ckpt/real3`. The 0.95 lever is now
-  **depth-axis center precision** (per-axis diagnostic, §6), not a finer grid.
+- **Status (2026-07-06):** current best is **`visweight46k-1`** (0.924 graspable
+  E2E, `ckpt/visweight46k1`, pulled to dev box). Active change: **near-face
+  center reparameterization** (branch `nearface-anchor`) — Stage 2 now places the
+  actual center as **visible near-face + a learned box-local offset** instead of a
+  residual off the visible center. Motivation: the sim labels the **visible depth
+  extent as a 0.5 m placeholder** when the depth dim is unobserved (**47.5%** of
+  boxes; verified), which makes the visible center — and therefore the old
+  `center_delta` target — **bimodal** along the ray. The **front-face plane is
+  shared exactly** between visible and actual boxes (0 mm, verified), so anchoring
+  the actual box there gives a **unimodal** target. This is the untried quadrant
+  after the three depth-axis dead ends (finer grid, depth-unfreeze, hard geometric
+  anchor). Next: full `visweight46k` recipe on 46k → judge by `jenga_eval_e2e.py`.
 
 ```bash
 # train (fixed data, frozen encoders, W&B opt-in)
@@ -98,6 +105,16 @@ in Stage 1; Stage 2 inherits it.
    (rotating/mis-assigning barely changes volume) → it can't supervise the axis
    assignment. ADD (corner-to-corner, fixed correspondence) does. ADD-S is the
    symmetry-tolerant variant.
+5. **Stage 2 anchors the center on the visible near-face, not the visible center.**
+   The sim labels the visible depth extent as a **0.5 m placeholder** when the
+   depth dim is unobserved (47.5% of boxes) → the visible *center* is bimodal
+   along the ray, so the old `center_delta` (residual off the visible center) had
+   a bimodal target. The **front-face plane is shared exactly** (0 mm) between
+   visible and actual, so Stage 2 predicts `face_delta` = a box-local offset from
+   the visible **near-face center** (`decode.visible_near_face`): unimodal target,
+   convention-invariant anchor. Under occlusion the actual face-center differs from
+   the visible one only **in-plane** (0 mm at vis≥0.9 → 35 mm at vis 0.6–0.9), which
+   is what `face_delta` learns; the along-ray placement is `+ SKU_depth/2` (known).
 
 ---
 
