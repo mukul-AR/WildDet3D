@@ -189,7 +189,7 @@ metadata.json: intrinsics, camera_extrinsic_4x4 (cam->world),
 | **real-train-1** | + **predicted boxes** (no teacher forcing) + bigger Stage-1 (78M) | **13.2k** | **0.893** (E2E graspable) | ✅ **current best** — train/test gap closed; 20 ep (5 GT-warmup → 15 predicted) |
 | real-train-2 | finer FPN (`fpn-0`, 288²) + head 384/4 + vis-weight 0.6 | 13.2k | 0.828 (E2E graspable) | ❌ **killed @ e18** — finer grid worse on every metric + over-predicting; dead end (see diagnostic) |
 | **depth-unfreeze-1** | r1 config + LingBot-depth last-4-block unfreeze @ 1e-6 | 13.2k | **0.880** (E2E graspable) | ❌ **regressed** vs r1's 0.893 (worse S1 1.60 / S2 1.86 cm center too). In-train val was **misleading** — showed 0.890 > r1 0.878, the *opposite* of the authoritative e2e. batch-8 confound. `ckpt/real3` |
-| **visweight46k-1** | r1 config + **vis-weight 0.6** (down-weight occluded Stage-2 loss) | **46k** | *running* | focus capacity on graspable boxes; 20 ep, batch 24, no cache → `ckpt/visweight46k1` |
+| **visweight46k-1** | r1 config + **vis-weight 0.6** (down-weight occluded Stage-2 loss) | **46k** | **0.924** (E2E graspable, 46k val) | ✅ **new best** — front 0.932, all 0.903, recall@.5 0.996, S2 ctr 1.59 cm; in-train val (0.911) *matched* e2e (no lying). ⚠️ vis-weight effect **unattributed** (confounded with 46k data — see §9.1). `ckpt/visweight46k1` |
 
 **`real-train-1` end-to-end eval (recall-inclusive, `jenga_eval_e2e.py`):**
 | subset | mean IoU | recall@.5 | recall@.75 |
@@ -258,13 +258,17 @@ ssh ubuntu@209.20.157.13          # key-based, 1× H100 80GB
 
 ## 9. Next steps
 
-1. **`visweight46k-1` (RUNNING, ~3 days) — focus Stage-2 on graspable boxes.** r1
-   config + `--vis-weight-thresh 0.6` (weight each Stage-2 box by
-   `clamp(vis_frac/0.6, 0.1, 1)`: full credit for graspable vf≥.6, tapering to a 0.1
-   floor for occluded), on the **46k** set (local `/home/ubuntu/sim_46335`), batch 24,
-   20 ep, **no cache** → `ckpt/visweight46k1`. Remote tmux `evalvisw46k` auto-runs the
-   e2e eval on exit. Caveat: 46k + vis-weight changes two things vs r1 → a "best next
-   model," not a clean ablation of the weighting alone.
+1. **`visweight46k-1` (DONE) — new best model: 0.924 graspable e2e.** r1 config +
+   `--vis-weight-thresh 0.6` on the **46k** set, batch 24, 20 ep, no cache →
+   `ckpt/visweight46k1`. **E2E (46k val): graspable IoU 0.924 (front 0.932, all 0.903),
+   recall@.5 0.996, S2 center 1.59 cm** — and the in-train val (0.911) *matched* the e2e
+   (no depth-unfreeze-style lying, so it's trustworthy). **BUT the win is confounded:** on
+   the *same* 46k val set, r1 scores only **0.690** graspable (0.893→0.690 — r1 is
+   out-of-distribution on 46k's 2× SKU variety; even Stage-1 recall drops to 0.82). So
+   **46k is a genuinely harder/distinct distribution**, and the +0.23 gap is dominated by
+   "trained on 46k vs not," NOT the vis-weighting. The **vis-weighting's own effect is
+   unattributed** — isolating it needs a 46k-WITHOUT-vis-weight baseline (~3 days), which
+   isn't worth it vs the appearance gap (§9.2). Deployment (real) is unchanged by this run.
 2. **THE real lever = the sim→real APPEARANCE gap (confirmed NOT calibration).** On a
    real capture (`data/place_*`; GT in `boxes_yaml_string`; `jenga_infer_real.py`):
    sim↔real intrinsics are **byte-identical** (the sim is calibrated to the real pole
