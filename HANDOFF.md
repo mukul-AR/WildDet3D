@@ -4,7 +4,10 @@
 > Frozen SAM3 + LingBot-Depth encoders → **Stage 1** (visible-box detection) →
 > **Stage 2** (dimension-conditioned: inherits orientation, picks the scene SKU,
 > places the full *actual* box). Trains on Isaac/anyware-sim data.
-> Branch: `visible_actual_estimation` (pushed to `github.com/mukul-AR/WildDet3D`).
+> Canonical branch: **`nearface-anchor`** — the superset of all work, merged to
+> `main` (2026-07-07). All other branches (`visible_actual_estimation`,
+> `depth-encoder-unfreeze`, `multiview-fusion`) are fully contained in it.
+> Pushed to `github.com/mukul-AR/WildDet3D`.
 
 ---
 
@@ -206,7 +209,8 @@ metadata.json: intrinsics, camera_extrinsic_4x4 (cam->world),
 | **real-train-1** | + **predicted boxes** (no teacher forcing) + bigger Stage-1 (78M) | **13.2k** | **0.893** (E2E graspable) | ✅ **current best** — train/test gap closed; 20 ep (5 GT-warmup → 15 predicted) |
 | real-train-2 | finer FPN (`fpn-0`, 288²) + head 384/4 + vis-weight 0.6 | 13.2k | 0.828 (E2E graspable) | ❌ **killed @ e18** — finer grid worse on every metric + over-predicting; dead end (see diagnostic) |
 | **depth-unfreeze-1** | r1 config + LingBot-depth last-4-block unfreeze @ 1e-6 | 13.2k | **0.880** (E2E graspable) | ❌ **regressed** vs r1's 0.893 (worse S1 1.60 / S2 1.86 cm center too). In-train val was **misleading** — showed 0.890 > r1 0.878, the *opposite* of the authoritative e2e. batch-8 confound. `ckpt/real3` |
-| **visweight46k-1** | r1 config + **vis-weight 0.6** (down-weight occluded Stage-2 loss) | **46k** | **0.924** (E2E graspable, 46k val) | ✅ **new best** — front 0.932, all 0.903, recall@.5 0.996, S2 ctr 1.59 cm; in-train val (0.911) *matched* e2e (no lying). ⚠️ vis-weight effect **unattributed** (confounded with 46k data — see §9.1). `ckpt/visweight46k1` |
+| **visweight46k-1** | r1 config + **vis-weight 0.6** (down-weight occluded Stage-2 loss) | **46k** | **0.924** (E2E graspable, 46k val) | ✅ **current best** — front 0.932, all 0.903, recall@.5 0.996, S2 ctr 1.59 cm; in-train val (0.911) *matched* e2e (no lying). ⚠️ vis-weight effect **unattributed** (confounded with 46k data — see §9.1). `ckpt/visweight46k1` |
+| **nearface-1** | visweight46k recipe + **near-face center anchor** (see §2.5) | **46k** | ⏳ **RUNNING** (launched 2026-07-06, ~epoch 6/20, ~2 days) | Tests the unimodal near-face reparameterization vs the 0.924 baseline. Clean single-variable A/B (identical recipe). tmux `nearface` on H100, `~/nearface.log`, done-flag `~/nearface.done` → `ckpt/nearface1`. **Judge by `jenga_eval_e2e.py`.** Prediction: lifts the *partial* (placeholder) bucket toward the *corner-match* bucket (§5). |
 
 **`real-train-1` end-to-end eval (recall-inclusive, `jenga_eval_e2e.py`):**
 | subset | mean IoU | recall@.5 | recall@.75 |
@@ -322,7 +326,15 @@ ssh ubuntu@209.20.157.13          # key-based, 1× H100 80GB
 
 ### Tooling added (this session)
 - `scripts/jenga_eval_e2e.py` — end-to-end eval: recall@IoU + **visibility-
-  stratified** report (all / graspable / front) + tail diagnostic.
+  stratified** report (all / graspable / front) + tail diagnostic + **corner-match
+  ("fully observed") stratum**: a GT-only flag for boxes whose visible corners
+  coincide with actual corners (depth snapped, no in-plane crop). Sharper "we fully
+  see it" signal than vis_frac (44% of vis≥.9 boxes still carry placeholder depth).
+  Verified on `visweight46k1`: **fully-observed 0.934 vs partial 0.904 IoU**; within
+  graspable 0.935 vs 0.923 — adds signal beyond vis_frac. But the gap is modest:
+  placeholder-depth boxes are still well-recovered via the SKU catalog (assign 0.98),
+  so "not fully observed" ≠ "badly estimated"; occlusion (vis<.3 → 0.74) is the real
+  IoU driver. Parameterization-independent, so it reads on both old and near-face models.
 - ADD-S (symmetry-tolerant) corner loss; occlusion-aware loss weighting
   (`--vis-weight-thresh`); per-epoch **graspable-IoU** in the val print.
 - `--stage2-input predicted` (+ `--tf-warmup-epochs`, `--resume`), bigger Stage-1
