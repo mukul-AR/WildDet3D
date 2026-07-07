@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import itertools
 import os
 import sys
 
@@ -37,6 +38,29 @@ from wilddet3d.dense.rotation_utils import (  # noqa: E402
 )
 from wilddet3d.dense.sim_jenga_dataset import SimJengaDataset, jenga_collate  # noqa: E402
 from wilddet3d.dense.stage2 import JengaStage2  # noqa: E402
+
+
+_CORNER_SIGNS = torch.tensor(
+    list(itertools.product((-0.5, 0.5), repeat=3)), dtype=torch.float32
+)  # [8,3]
+
+
+def corner_match(vc, vs, ac, asz, R, thr=0.02):
+    """Per-GT bool: do the GT *visible* box corners coincide with the GT *actual*
+    box corners (within ``thr`` m)? Visible & actual share R, so a match means the
+    box is **fully observed** — depth is snapped (not the 0.5 m placeholder) and
+    there is no in-plane occlusion crop. This is a sharper "we fully see it" signal
+    than vis_frac (44% of vis>=0.9 boxes still carry a placeholder depth extent).
+
+    Args: vc/ac ``[N,3]`` visible/actual centers, vs/asz ``[N,3]`` sizes,
+    R ``[N,3,3]`` shared rotation. Returns bool ``[N]`` (max-corner-dist < thr).
+    """
+    if vc.shape[0] == 0:
+        return torch.zeros(0, dtype=torch.bool)
+    s = _CORNER_SIGNS.to(vc)
+    vco = vc[:, None, :] + torch.einsum("nij,nkj->nki", R, s * vs[:, None, :])
+    aco = ac[:, None, :] + torch.einsum("nij,nkj->nki", R, s * asz[:, None, :])
+    return (vco - aco).norm(dim=-1).max(dim=1).values < thr
 
 
 def move(batch, device):
@@ -86,7 +110,7 @@ def main() -> None:
     model.eval(); stage2.eval()
 
     # accumulate per-GT records (matched to nearest predicted actual box)
-    iou_l, ctr_l, sz_l, rot_l, vf_l = [], [], [], [], []
+    iou_l, ctr_l, sz_l, rot_l, vf_l, cm_l = [], [], [], [], [], []
     # Stage attribution: for the SAME matched prediction, its *visible*-box
     # center error (Stage-1 localization) vs its *actual*-box center error
     # (Stage-2 placement). Splits where the residual center error originates.
@@ -110,8 +134,10 @@ def main() -> None:
             from wilddet3d.dense.rotation_utils import rotation_6d_to_matrix
             gr = rotation_6d_to_matrix(batch["act_rot6d"][i].float())
             vf = batch["vis_frac"][i].float()
+            gvs = batch["vis_size"][i].float()  # GT *visible*-box size
             ng = gc.shape[0]
             n_gt += ng
+            cm = corner_match(gvc, gvs, gc, gs, gr)  # fully-observed flag (GT-only)
             pc, ps, pr = res[i]["center"], res[i]["size"], res[i]["R"]
             m = pc.shape[0]
             n_pred += m
@@ -121,7 +147,9 @@ def main() -> None:
                 iou_l.append(torch.zeros(ng)); ctr_l.append(torch.full((ng,), 9.9))
                 sz_l.append(torch.full((ng,), 9.9)); rot_l.append(torch.full((ng,), 99.0))
                 vf_l.append(vf.cpu()); vctr_l.append(torch.full((ng,), 9.9))
+                cm_l.append(cm.cpu())
                 continue
+            cm_l.append(cm.cpu())
             d = torch.cdist(gc, pc)            # [N, M] GT->pred center dist
             nn = d.argmin(dim=1); nnd = d.min(dim=1).values
             # same matched prediction's visible center vs GT visible center (Stage-1)
@@ -142,6 +170,7 @@ def main() -> None:
 
     iou = torch.cat(iou_l); ctr = torch.cat(ctr_l); sz = torch.cat(sz_l)
     rot = torch.cat(rot_l); vf = torch.cat(vf_l); vctr = torch.cat(vctr_l)
+    cm = torch.cat(cm_l)
     print("\n============== JENGA end-to-end eval (Stage 1 -> Stage 2) ==============")
     print(f"  GT boxes: {n_gt}  |  predicted boxes: {n_pred}")
     print(f"  mean per-GT 3D IoU   : {iou.mean():.4f}")
@@ -155,6 +184,23 @@ def main() -> None:
         if int(m.sum()):
             print(f"    {name:<22}{int(m.sum()):>7}{iou[m].mean():>10.3f}"
                   f"{(iou[m]>=0.5).float().mean():>11.3f}{(iou[m]>=0.75).float().mean():>12.3f}")
+    print("\n  --- BY OBSERVATION (visible corners match actual => fully observed) ---")
+    print(f"    corner-match rate: {cm.float().mean():.3f}  "
+          f"({int(cm.sum())}/{cm.numel()} boxes fully observed; depth snapped + no crop)")
+    print(f"    {'subset':<28}{'n':>7}{'meanIoU':>10}{'recall@.5':>11}{'recall@.75':>12}")
+    for name, mask in [("fully-observed (corner-match)", cm),
+                       ("partial (placeholder/occluded)", ~cm)]:
+        if int(mask.sum()):
+            print(f"    {name:<28}{int(mask.sum()):>7}{iou[mask].mean():>10.3f}"
+                  f"{(iou[mask]>=0.5).float().mean():>11.3f}{(iou[mask]>=0.75).float().mean():>12.3f}")
+    # cross-tab: within graspable, does corner-match still separate?
+    g = vf >= 0.6
+    for name, mask in [("  graspable & corner-match", g & cm),
+                       ("  graspable & partial", g & ~cm)]:
+        if int(mask.sum()):
+            print(f"    {name:<28}{int(mask.sum()):>7}{iou[mask].mean():>10.3f}"
+                  f"{(iou[mask]>=0.5).float().mean():>11.3f}{(iou[mask]>=0.75).float().mean():>12.3f}")
+
     print("\n  --- STAGE ATTRIBUTION (center error on detection-matched boxes) ---")
     print("    Where does the center error originate? S1 = visible-box center"
           " (localization); S2 = actual-box center (placement).")
