@@ -40,7 +40,11 @@
   shared exactly** between visible and actual boxes (0 mm, verified), so anchoring
   the actual box there gives a **unimodal** target. This is the untried quadrant
   after the three depth-axis dead ends (finer grid, depth-unfreeze, hard geometric
-  anchor). Next: full `visweight46k` recipe on 46k → judge by `jenga_eval_e2e.py`.
+  anchor). **Status: `nearface-1` is RUNNING on the H100** (visweight46k recipe on
+  46k, launched 2026-07-06, ~epoch 6/20, ETA ~2 days, `ckpt/nearface1`) — a clean
+  single-variable A/B vs the 0.924 baseline. Judge by `jenga_eval_e2e.py`; the
+  mechanism check is whether the *partial* (placeholder) bucket rises toward the
+  *corner-match* bucket (§5). Canonical branch is now `nearface-anchor` (== `main`).
 
 ```bash
 # train (fixed data, frozen encoders, W&B opt-in)
@@ -279,7 +283,20 @@ ssh ubuntu@209.20.157.13          # key-based, 1× H100 80GB
 
 ## 9. Next steps
 
-1. **`visweight46k-1` (DONE) — new best model: 0.924 graspable e2e.** r1 config +
+0. **`nearface-1` (RUNNING) — near-face center reparameterization.** The active
+   experiment (§2.5): Stage 2 places the actual center as visible near-face + a
+   learned box-local `face_delta` (unimodal target) instead of a residual off the
+   bimodal visible center. visweight46k recipe on 46k, tmux `nearface` on the H100,
+   `~/nearface.log` / done-flag `~/nearface.done` → `ckpt/nearface1`. **When done:**
+   `jenga_eval_e2e.py` on the 46k val vs the **0.924** baseline. Reads: (a) does
+   graspable E2E IoU beat 0.924? (b) mechanism — did the *partial* bucket rise toward
+   the *corner-match* bucket (§5)? **If better:** promote to best, re-eval on real
+   (`jenga_infer_real.py`) — the domain-invariant near-face anchor should also help the
+   real depth-shallow bias. **If not:** the two commits (near-face) are a clean revert;
+   `visweight46k1` stays best. *Follow-up idea (only after this validates):* corner-match
+   as a **training** signal — but aim it at the *harder* partial boxes, and resume from
+   the epoch-5 ckpt rather than restart.
+1. **`visweight46k-1` (DONE) — prior best model: 0.924 graspable e2e.** r1 config +
    `--vis-weight-thresh 0.6` on the **46k** set, batch 24, 20 ep, no cache →
    `ckpt/visweight46k1`. **E2E (46k val): graspable IoU 0.924 (front 0.932, all 0.903),
    recall@.5 0.996, S2 center 1.59 cm** — and the in-train val (0.911) *matched* the e2e

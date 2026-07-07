@@ -3,7 +3,7 @@
 Prompt-free, single-view **9-DoF 3D box detector** for warehouse unloading.
 Frozen SAM3 + LingBot-Depth encoders → **Stage 1** (visible box) → **Stage 2**
 (dimension-conditioned: inherits rotation, picks the scene SKU, places the full
-actual box). Working branch: `visible_actual_estimation`.
+actual box). Canonical branch: `nearface-anchor` (== `main`).
 
 **`HANDOFF.md` has the full design, run history, and current status — read it first.**
 
