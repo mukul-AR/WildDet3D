@@ -83,6 +83,8 @@ def main() -> None:
     ap.add_argument("--n-samples", type=int, default=4096)
     ap.add_argument("--posthoc-anchor", action="store_true",
                     help="replace Stage-2 learned center with geometric near-face anchor")
+    ap.add_argument("--dump-preds", default=None,
+                    help="torch.save per-view GT+pred records here (offline tail-audit / scene-snap)")
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -118,6 +120,8 @@ def main() -> None:
     n_gt = 0
     n_pred = 0
     prec_hit = 0
+    dump = [] if args.dump_preds else None
+    gi = 0  # running view index into ds.samples (loader shuffle=False)
     for batch in loader:
         batch = move(batch, args.device)
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
@@ -141,6 +145,29 @@ def main() -> None:
             pc, ps, pr = res[i]["center"], res[i]["size"], res[i]["R"]
             m = pc.shape[0]
             n_pred += m
+            rec = None
+            if dump is not None:
+                rec = {
+                    "view": ds.samples[gi][0] if gi < len(ds.samples) else "?",
+                    "K": batch["K"][i].float().cpu(),
+                    "gt_center": gc.cpu(), "gt_size": gs.cpu(), "gt_R": gr.cpu(),
+                    "gt_vis_center": gvc.cpu(), "gt_vis_size": gvs.cpu(),
+                    "gt_vis_rot6d": batch["vis_rot6d"][i].float().cpu(),
+                    "gt_vis_box2d": batch["vis_box2d"][i].float().cpu(),
+                    "vis_frac": vf.cpu(), "corner_match": cm.cpu(),
+                    "gt_assign": batch["assign"][i].cpu(),
+                    "catalog": batch["catalog"][i].float().cpu(),
+                    "s1_center": dets[i]["center"].float().cpu(),
+                    "s1_size": dets[i]["size"].float().cpu(),
+                    "s1_R": dets[i]["R"].float().cpu(),
+                    "s1_score": dets[i]["score"].float().cpu(),
+                    "pred_center": pc.float().cpu(), "pred_size": ps.float().cpu(),
+                    "pred_R": pr.float().cpu(), "pred_score": res[i]["score"].float().cpu(),
+                    "pred_assign": res[i]["assign"].cpu() if "assign" in res[i] else None,
+                    "nn": None, "nnd": None, "iou": None,  # filled below if matched
+                }
+                dump.append(rec)
+            gi += 1
             if ng == 0:
                 continue
             if m == 0:
@@ -158,6 +185,8 @@ def main() -> None:
             mp_c, mp_s, mp_r = pc[nn], ps[nn], pr[nn]   # nearest pred per GT
             iou = iou3d_mc(mp_c, mp_s, mp_r, gc, gs, gr, args.n_samples)
             iou = torch.where(nnd < args.match_thresh, iou, torch.zeros_like(iou))
+            if rec is not None:
+                rec["nn"] = nn.cpu(); rec["nnd"] = nnd.cpu(); rec["iou"] = iou.cpu()
             rot = rad2deg(symmetry_min_geodesic(
                 matrix_to_rotation_6d(mp_r), matrix_to_rotation_6d(gr)))
             iou_l.append(iou.cpu()); ctr_l.append(nnd.cpu())
@@ -229,6 +258,9 @@ def main() -> None:
     print(f"  low-IoU (<0.75)  : {stats(lowm)}")
     print(f"  high-IoU (>=0.75): {stats(himask)}")
     print("========================================================================\n")
+    if dump is not None:
+        torch.save(dump, args.dump_preds)
+        print(f"dumped {len(dump)} view records -> {args.dump_preds}", flush=True)
 
 
 if __name__ == "__main__":
