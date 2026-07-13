@@ -29,22 +29,27 @@
   in unloading, heavily-occluded boxes are picked later (once un-occluded), so
   their IoU isn't actionable now (we still emit them for collision safety).
 - **Gate:** 3D IoU ≥ 0.95 (on graspable boxes), rotation < 5° median.
-- **Status (2026-07-06):** current best is **`visweight46k-1`** (0.924 graspable
-  E2E, `ckpt/visweight46k1`, pulled to dev box). Active change: **near-face
-  center reparameterization** (branch `nearface-anchor`) — Stage 2 now places the
-  actual center as **visible near-face + a learned box-local offset** instead of a
-  residual off the visible center. Motivation: the sim labels the **visible depth
-  extent as a 0.5 m placeholder** when the depth dim is unobserved (**47.5%** of
-  boxes; verified), which makes the visible center — and therefore the old
-  `center_delta` target — **bimodal** along the ray. The **front-face plane is
-  shared exactly** between visible and actual boxes (0 mm, verified), so anchoring
-  the actual box there gives a **unimodal** target. This is the untried quadrant
-  after the three depth-axis dead ends (finer grid, depth-unfreeze, hard geometric
-  anchor). **Status: `nearface-1` is RUNNING on the H100** (visweight46k recipe on
-  46k, launched 2026-07-06, ~epoch 6/20, ETA ~2 days, `ckpt/nearface1`) — a clean
-  single-variable A/B vs the 0.924 baseline. Judge by `jenga_eval_e2e.py`; the
-  mechanism check is whether the *partial* (placeholder) bucket rises toward the
-  *corner-match* bucket (§5). Canonical branch is now `nearface-anchor` (== `main`).
+- **Status (2026-07-13):** current best is **`visweight46k-1`** (0.924 graspable
+  E2E, `ckpt/visweight46k1`, on dev box). **ACTIVE: `appearaug46k-1` is RUNNING on
+  the H100** (launched 2026-07-13, ~3 days, W&B `4jc1wdwz`) — the exact visweight46k
+  recipe + **train-time RGB photometric / ZED-like depth-noise augmentation**
+  (`--aug`, new `wilddet3d/dense/augment.py`; dataset previously had ZERO aug).
+  **Judge it on the REAL captures** (`jenga_infer_real.py`: rot 9° → target ≤2–3°,
+  ctr 17 cm → single digits); in-train val is clean-val so ~flat-vs-baseline is
+  expected, and sim e2e just needs to hold ≥~0.92 (§9.2).
+  Since the last update: (a) `nearface-1` concluded a **validated NEGATIVE** (0.917
+  vs 0.924; the 0.5 m placeholder is NOT the graspable bottleneck — see §9.0; revert
+  of the two near-face commits on `main` still pending); (b) a **tail audit** of the
+  graspable failures found **no hidden bug** — only 39/2418 boxes fail (<0.75 IoU),
+  concentrated in dense 45–55-box walls where Stage-1 clutter degrades; fixing all
+  of them is worth only +0.005 (§9.6); (c) a **scene-snap prototype** showed the
+  self-referential plane snap gains +0.005 but is **flattered by unnaturally flush
+  sim walls** (85% of GT front-face clusters <2 mm stagger — real walls won't be);
+  the **ORACLE (true per-box front planes) = 0.9495 graspable — the 0.95 gate** —
+  so per-box front-face depth is the entire remaining sim gap, and the stagger-proof
+  lever is a **per-box depth-map plane fit** (§9.7); (d) the team will **regenerate
+  sim data with front-face stagger**, which folds geometric randomization into the
+  next retrain after `appearaug46k-1`.
 
 ```bash
 # train (fixed data, frozen encoders, W&B opt-in)
@@ -113,6 +118,9 @@ in Stage 1; Stage 2 inherits it.
    assignment. ADD (corner-to-corner, fixed correspondence) does. ADD-S is the
    symmetry-tolerant variant.
 5. **Stage 2 anchors the center on the visible near-face, not the visible center.**
+   ⚠️ **Reverted — validated NEGATIVE (see §9.0):** this reparameterization regressed
+   graspable E2E 0.924 → 0.917; the 0.5 m placeholder turned out not to be the
+   graspable bottleneck. The design below describes the (reverted) near-face variant.
    The sim labels the visible depth extent as a **0.5 m placeholder** when the
    depth dim is unobserved (47.5% of boxes) → the visible *center* is bimodal
    along the ray, so the old `center_delta` (residual off the visible center) had
@@ -197,6 +205,10 @@ metadata.json: intrinsics, camera_extrinsic_4x4 (cam->world),
 - `scripts/jenga_export_pred.py` — runs the **full chain** (Stage-1 → Stage-2)
   per scene, writes world-frame predicted boxes as `<pred-dir>/<scene>.json` for
   the viz tool.
+- `jenga_eval_e2e.py --dump-preds <f.pt>` — saves per-view GT+pred records (boxes,
+  matching, per-GT IoU, vis_frac, corner-match, SKU assign, catalog, K, view path)
+  for **offline no-GPU analysis** (tail audit, scene-snap, flushness — §9.6/§9.7).
+  One 2-min GPU pass, then everything else runs on CPU from the dump.
 - 18 unit tests in `tests/dense/` (`PYTHONPATH=. .venv/bin/python -m pytest tests/dense/`).
 
 ---
@@ -214,7 +226,8 @@ metadata.json: intrinsics, camera_extrinsic_4x4 (cam->world),
 | real-train-2 | finer FPN (`fpn-0`, 288²) + head 384/4 + vis-weight 0.6 | 13.2k | 0.828 (E2E graspable) | ❌ **killed @ e18** — finer grid worse on every metric + over-predicting; dead end (see diagnostic) |
 | **depth-unfreeze-1** | r1 config + LingBot-depth last-4-block unfreeze @ 1e-6 | 13.2k | **0.880** (E2E graspable) | ❌ **regressed** vs r1's 0.893 (worse S1 1.60 / S2 1.86 cm center too). In-train val was **misleading** — showed 0.890 > r1 0.878, the *opposite* of the authoritative e2e. batch-8 confound. `ckpt/real3` |
 | **visweight46k-1** | r1 config + **vis-weight 0.6** (down-weight occluded Stage-2 loss) | **46k** | **0.924** (E2E graspable, 46k val) | ✅ **current best** — front 0.932, all 0.903, recall@.5 0.996, S2 ctr 1.59 cm; in-train val (0.911) *matched* e2e (no lying). ⚠️ vis-weight effect **unattributed** (confounded with 46k data — see §9.1). `ckpt/visweight46k1` |
-| **nearface-1** | visweight46k recipe + **near-face center anchor** (see §2.5) | **46k** | ⏳ **RUNNING** (launched 2026-07-06, ~epoch 6/20, ~2 days) | Tests the unimodal near-face reparameterization vs the 0.924 baseline. Clean single-variable A/B (identical recipe). tmux `nearface` on H100, `~/nearface.log`, done-flag `~/nearface.done` → `ckpt/nearface1`. **Judge by `jenga_eval_e2e.py`.** Prediction: lifts the *partial* (placeholder) bucket toward the *corner-match* bucket (§5). |
+| **nearface-1** | visweight46k recipe + **near-face center anchor** (see §2.5) | **46k** | **0.917** (E2E graspable, 46k val) | ❌ **regressed** vs visweight46k-1's 0.924 (−0.007); worse/equal in every vis_frac bucket; recall@.75 0.969 vs 0.985; S2 ctr 1.67 vs 1.59 cm. In-train val agreed (0.904 vs 0.911 — no lying). **Corner-match tell:** within graspable, fully-observed 0.919 ≈ partial 0.916 → the 0.5 m placeholder is **not** the graspable bottleneck (that gap is occlusion, in the non-graspable set). Clean single-variable A/B. **Validated negative → revert near-face commits, keep visweight46k-1.** `ckpt/nearface1` |
+| **appearaug46k-1** | visweight46k recipe + **`--aug`** (train-time RGB photometric + ZED-like depth noise, `wilddet3d/dense/augment.py`) | **46k** | ⏳ **RUNNING** (launched 2026-07-13, ~3 days) | Attacks the sim→real appearance gap (§9.2). Clean A/B vs 0.924. tmux `appearaug` on H100, `~/appearaug.log`, done-flag `~/appearaug.done` → `ckpt/appearaug46k1`, W&B `4jc1wdwz`. **Judge on REAL captures** (`jenga_infer_real.py`: rot 9°→≤2–3°); in-train val is clean-val (expect ~flat); sim e2e must hold ≥~0.92. Aug smoke-tested on H100 (GT bit-identical, depth noise ~0.5 cm, +0 wall-clock). |
 
 **`real-train-1` end-to-end eval (recall-inclusive, `jenga_eval_e2e.py`):**
 | subset | mean IoU | recall@.5 | recall@.75 |
@@ -283,19 +296,23 @@ ssh ubuntu@209.20.157.13          # key-based, 1× H100 80GB
 
 ## 9. Next steps
 
-0. **`nearface-1` (RUNNING) — near-face center reparameterization.** The active
-   experiment (§2.5): Stage 2 places the actual center as visible near-face + a
-   learned box-local `face_delta` (unimodal target) instead of a residual off the
-   bimodal visible center. visweight46k recipe on 46k, tmux `nearface` on the H100,
-   `~/nearface.log` / done-flag `~/nearface.done` → `ckpt/nearface1`. **When done:**
-   `jenga_eval_e2e.py` on the 46k val vs the **0.924** baseline. Reads: (a) does
-   graspable E2E IoU beat 0.924? (b) mechanism — did the *partial* bucket rise toward
-   the *corner-match* bucket (§5)? **If better:** promote to best, re-eval on real
-   (`jenga_infer_real.py`) — the domain-invariant near-face anchor should also help the
-   real depth-shallow bias. **If not:** the two commits (near-face) are a clean revert;
-   `visweight46k1` stays best. *Follow-up idea (only after this validates):* corner-match
-   as a **training** signal — but aim it at the *harder* partial boxes, and resume from
-   the epoch-5 ckpt rather than restart.
+0. **`nearface-1` (DONE — validated NEGATIVE) — near-face center reparameterization.**
+   Stage 2 placed the actual center as visible near-face + a learned box-local
+   `face_delta` (unimodal target) instead of a residual off the bimodal visible center
+   (§2.5). Retrained on 46k, identical visweight46k recipe (clean A/B) → **graspable
+   E2E 0.917 vs 0.924** (−0.007), worse/equal in every vis_frac bucket; in-train val
+   agreed (0.904 vs 0.911). **Mechanism (the value of this run):** the corner-match
+   metric shows *within graspable* fully-observed 0.919 ≈ partial 0.916 → the **0.5 m
+   depth placeholder is NOT the graspable bottleneck**; the old 0.934/0.904 gap is an
+   **occlusion** effect living in the non-graspable partial boxes. So near-face was
+   aimed at a non-lever, and its argmax-axis anchor (flips when two axes are near-equally
+   ray-aligned) added slight target noise. **Action:** revert the two near-face commits
+   (3a58352 + follow-up) from `main`/`nearface-anchor`; `visweight46k1` stays canonical
+   best. **KEEP** the `corner_match` block in `jenga_eval_e2e.py` (it earned its place).
+   *Corner-match-as-training is NOT worth pursuing* — it would target a stratum that's
+   already at parity on graspable. `ckpt/nearface1` + `eval_nearface1.log` on dev box.
+   → **Real lever is now unambiguously the sim→real appearance gap (§9.2) and the
+   isotropic depth-axis center variance, not observability.**
 1. **`visweight46k-1` (DONE) — prior best model: 0.924 graspable e2e.** r1 config +
    `--vis-weight-thresh 0.6` on the **46k** set, batch 24, 20 ep, no cache →
    `ckpt/visweight46k1`. **E2E (46k val): graspable IoU 0.924 (front 0.932, all 0.903),
@@ -307,7 +324,8 @@ ssh ubuntu@209.20.157.13          # key-based, 1× H100 80GB
    "trained on 46k vs not," NOT the vis-weighting. The **vis-weighting's own effect is
    unattributed** — isolating it needs a 46k-WITHOUT-vis-weight baseline (~3 days), which
    isn't worth it vs the appearance gap (§9.2). Deployment (real) is unchanged by this run.
-2. **THE real lever = the sim→real APPEARANCE gap (confirmed NOT calibration).** On a
+2. **THE real lever = the sim→real APPEARANCE gap (confirmed NOT calibration) —
+   ⏳ IN PROGRESS via `appearaug46k-1`.** On a
    real capture (`data/place_*`; GT in `boxes_yaml_string`; `jenga_infer_real.py`):
    sim↔real intrinsics are **byte-identical** (the sim is calibrated to the real pole
    rig — same fx/fy/FOV/camera positions), yet on real the model gives **rotation 9°
@@ -315,8 +333,14 @@ ssh ubuntu@209.20.157.13          # key-based, 1× H100 80GB
    pure **appearance** (real RGB + real-estimated depth ≠ sim-rendered clean RGB/depth).
    More sim data won't fix it (46k = same occlusion mix as 13.2k, only +2× SKU variety).
    Levers: (a) real-data fine-tune (needs more labeled `place_*` captures); (b) **RGB +
-   depth domain randomization / augmentation** in sim — the dataset currently does
-   **ZERO augmentation**, so large headroom. *Rejected:* train on LingBot-sim-depth
+   depth domain randomization / augmentation** in sim — **now implemented**
+   (`wilddet3d/dense/augment.py`, `--aug`: brightness/contrast/gamma/WB/hue-sat/blur/
+   noise/JPEG on RGB; low-freq multiplicative bias, relative white noise, speckle holes,
+   edge dropout, 1 mm quantization on depth; train split only, val clean, ~5% clean
+   passthrough, per-worker RNG from torch, incompatible with the SAM3 feat cache) and
+   **training as `appearaug46k-1`**. When it lands: eval REAL first, then sim e2e. Next
+   after that: **staggered-walls data regen** (§9.7) folds geometric randomization into
+   one more retrain. *Rejected:* train on LingBot-sim-depth
    (not what the deployment camera outputs).
 3. **Geometric near-face anchor** (`--posthoc-anchor`, eval + infer): replaces the
    learned center_delta with "anchor the actual box's camera-facing face to the visible
@@ -331,6 +355,31 @@ ssh ubuntu@209.20.157.13          # key-based, 1× H100 80GB
    2.3 s local vs minutes on NFS); the RGB feature cache is **not** worth it for large
    sets — a cached feat (10.6 MB) is 8× a raw image, so on NFS it's *more* I/O to save
    idle compute; only `data_combined` (RAM-cached, local) is a case where it helps.
+6. **Tail audit (DONE 2026-07-10) — no hidden bug in the graspable tail.** From the
+   `--dump-preds` dump of `visweight46k1`: only **39/2418** graspable boxes score <0.75,
+   and bucketing them (missed / shared-pred / wrong-SKU / axis-perm / center-depth /
+   center-inplane) shows **fixing ALL of them is worth just +0.005** headline. Half the
+   failures concentrate in 3 **dense-wall scenes** (45–55 boxes/view vs ~26 avg; one is
+   single-SKU, so pure placement) where the failing boxes' **Stage-1 visible centers were
+   already ~6 cm off** (vs 1.4 cm normal) — a clutter/capacity effect cascading into
+   Stage 2, not a labeling or logic bug. SKU assign + detection are near-perfect on
+   graspables. → Don't hunt the tail; it isn't the path to the gate.
+7. **Scene-level geometry (DONE 2026-07-10) — the oracle hits the gate; per-box depth-fit
+   is the lever.** Prototype: cluster predicted front (near) faces into shared planes
+   (union-find on normal agreement + coplanarity), snap along-ray placement to the
+   cluster median. **Self-snap: graspable 0.925→0.930** (+0.005, param-sweep flat) — but
+   this is **flattered by unnaturally flush sim walls**: 85% of GT front-face clusters
+   have <2 mm stagger (median 0.00 cm), which real walls won't have, so cross-box
+   snapping is NOT a deployment candidate (and the model itself may have internalized a
+   flushness prior — another reason for stagger in data-gen). **ORACLE — snap each box to
+   its own true front plane: graspable 0.925→0.9495 = the 0.95 gate**, along-ray err
+   0.64→0.28 cm. Per-box front-face depth is therefore the *entire* remaining sim gap.
+   The stagger-proof next step is a **per-box depth-map plane fit** (fit each box's front
+   plane from its own depth pixels — the front face is a visible surface and depth is
+   already a model input; same operation as deployment's global scene optimization, so
+   the per-box eval *understates* deployed accuracy). **Data-gen action (team): regenerate
+   sim with front-face stagger (~1–2 cm σ)** and re-run the flushness check on the new
+   dump; the stagger regen + `--aug` combine into one retrain after `appearaug46k-1`.
 
 ### Confirmed dead ends (don't re-run)
 - **Finer FPN grid** (`--fpn-level 0`, real-train-2): E2E graspable 0.893 → **0.828**.
@@ -340,6 +389,10 @@ ssh ubuntu@209.20.157.13          # key-based, 1× H100 80GB
   *opposite* — **always confirm with `jenga_eval_e2e.py`, not the training val print**.
 - **Geometric center anchor on sim** (`--posthoc-anchor`): graspable 0.893 → **0.861**
   (it helps only the *real* depth-bias; see §9.3).
+- **Near-face center reparameterization** (`nearface-1`): graspable 0.924 → **0.917**;
+  the 0.5 m placeholder is not the graspable bottleneck (§9.0). Revert; keep corner-match.
+- **Cross-box plane snap as deployment post-proc**: +0.005 on sim but rides the
+  unnaturally-flush sim walls (§9.7); per-box depth-fit is the honest variant.
 
 ### Tooling added (this session)
 - `scripts/jenga_eval_e2e.py` — end-to-end eval: recall@IoU + **visibility-
@@ -352,6 +405,13 @@ ssh ubuntu@209.20.157.13          # key-based, 1× H100 80GB
   placeholder-depth boxes are still well-recovered via the SKU catalog (assign 0.98),
   so "not fully observed" ≠ "badly estimated"; occlusion (vis<.3 → 0.74) is the real
   IoU driver. Parameterization-independent, so it reads on both old and near-face models.
+- **`wilddet3d/dense/augment.py` + `--aug`** — train-time RGB photometric + ZED-like
+  depth-noise augmentation (see §9.2 for components); train split only, val clean;
+  raises if combined with `--feat-cache-dir` (cached SAM3 feats are clean-RGB).
+- **`--dump-preds`** on `jenga_eval_e2e.py` (per-view records for offline analysis; §5).
+  The tail-audit / scene-snap / flushness analysis scripts live in the session
+  scratchpad (`tail_audit.py`, `scene_snap.py`, `smoke_aug.py`) — promote to
+  `scripts/` if they become recurring tools.
 - ADD-S (symmetry-tolerant) corner loss; occlusion-aware loss weighting
   (`--vis-weight-thresh`); per-epoch **graspable-IoU** in the val print.
 - `--stage2-input predicted` (+ `--tf-warmup-epochs`, `--resume`), bigger Stage-1
