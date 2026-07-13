@@ -231,6 +231,9 @@ def main() -> None:
                     help="dir of precomputed SAM3 RGB FPN features "
                          "(scripts/precompute_feat_cache.py); skips the frozen SAM3 forward "
                          "for ~1.6x faster steps. Requires the RGB backbone frozen (--encoder-lr 0).")
+    ap.add_argument("--aug", action="store_true",
+                    help="train-time RGB photometric + depth-noise augmentation "
+                         "(wilddet3d/dense/augment.py); val stays clean")
     ap.add_argument("--resume", default=None, help="checkpoint to resume model+stage2 from")
     ap.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--out", default="ckpt/jenga")
@@ -247,7 +250,8 @@ def main() -> None:
 
     tr_ds = SimJengaDataset(args.sim_root, args.size, args.max_scenes,
                             split="train", val_frac=args.val_frac,
-                            feat_cache_dir=args.feat_cache_dir)
+                            feat_cache_dir=args.feat_cache_dir,
+                            augment=args.aug)
     va_ds = SimJengaDataset(args.sim_root, args.size, args.max_scenes,
                             split="val", val_frac=args.val_frac,
                             feat_cache_dir=args.feat_cache_dir)

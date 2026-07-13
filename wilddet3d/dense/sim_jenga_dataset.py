@@ -18,6 +18,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from wilddet3d.dense.augment import augment_depth, augment_rgb
 from wilddet3d.dense.jenga_utils import assign_index, parse_catalog
 from wilddet3d.dense.sim_dataset import (
     _IMAGENET_MEAN,
@@ -69,11 +70,18 @@ class SimJengaDataset(Dataset):
         split: str = "train",
         val_frac: float = 0.1,
         feat_cache_dir: str | None = None,
+        augment: bool = False,
     ) -> None:
         super().__init__()
         assert split in ("train", "val")
         self.size = size
         self.min_visible = min_visible
+        # photometric RGB + ZED-like depth-noise augmentation (train only;
+        # incompatible with the SAM3 feat cache, which stores clean-RGB features)
+        self.augment = augment
+        if augment and feat_cache_dir:
+            raise ValueError("augment=True is incompatible with feat_cache_dir "
+                             "(cached SAM3 features were computed on clean RGB)")
         # dir of precomputed SAM3 RGB FPN features (one .npy per view, keyed by
         # md5 of the abspath). When set, __getitem__ attaches "rgb_fpn" so the
         # trainer can skip the frozen SAM3 forward. See precompute_feat_cache.py.
@@ -121,9 +129,16 @@ class SimJengaDataset(Dataset):
 
         rgb_p, scale, px, py = _resize_pad(rgb, self.size, nearest=False)
         depth_p, _, _, _ = _resize_pad(depth.astype(np.uint16), self.size, nearest=True)
+        depth_f = depth_p.astype(np.float32) / 1000.0
+        if self.augment:
+            # seed numpy from torch's per-worker RNG: torch seeds workers
+            # distinctly, bare numpy does NOT (identical streams across workers)
+            rng = np.random.default_rng(int(torch.randint(0, 2**31 - 1, (1,)).item()))
+            rgb_p = augment_rgb(rgb_p, rng)
+            depth_f = augment_depth(depth_f, rng)
         img = (rgb_p.astype(np.float32) / 255.0 - _IMAGENET_MEAN) / _IMAGENET_STD
         img = torch.from_numpy(img.transpose(2, 0, 1))
-        depth_m = torch.from_numpy((depth_p.astype(np.float32) / 1000.0)[None])
+        depth_m = torch.from_numpy(depth_f[None])
         k_adj = np.array(
             [
                 [fx * scale, 0, cx * scale + px],
